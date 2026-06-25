@@ -14,9 +14,18 @@ function safeEqual(a: string, b: string): boolean {
 
 export async function POST(request: NextRequest) {
   const expected = process.env.APP_PASSCODE;
-  if (!expected) {
+  const sessionSecret = process.env.SESSION_SECRET;
+  // Both are required to issue a session. Report which is missing so a config
+  // gap doesn't surface as a misleading "Incorrect passcode".
+  if (!expected || !sessionSecret) {
+    const missing = [
+      !expected ? "APP_PASSCODE" : null,
+      !sessionSecret ? "SESSION_SECRET" : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
     return NextResponse.json(
-      { ok: false, error: "Server not configured: APP_PASSCODE is missing" },
+      { ok: false, error: `Server not configured: ${missing} not set` },
       { status: 500 }
     );
   }

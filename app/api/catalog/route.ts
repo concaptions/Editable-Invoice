@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth } from "@/lib/auth-guard";
-import { searchSubmissions } from "@/lib/sheets";
+import { getCatalog } from "@/lib/catalog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,16 +9,11 @@ export async function GET(request: NextRequest) {
   const unauthorized = await requireAuth(request);
   if (unauthorized) return unauthorized;
 
-  const q = request.nextUrl.searchParams.get("q")?.trim() ?? "";
-  if (!q) {
-    return NextResponse.json({ results: [] });
-  }
-
   try {
-    const results = await searchSubmissions(q);
-    return NextResponse.json({ results });
+    const items = await getCatalog();
+    return NextResponse.json({ items });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Search failed";
+    const message = e instanceof Error ? e.message : "Failed to load catalog";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

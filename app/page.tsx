@@ -22,11 +22,7 @@ export default function SearchPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/po/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q }),
-      });
+      const res = await fetch(`/api/po/search?q=${encodeURIComponent(q)}`);
       const data = (await res.json().catch(() => ({}))) as {
         results?: SearchResult[];
         error?: string;

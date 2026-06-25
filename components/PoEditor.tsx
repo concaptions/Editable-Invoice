@@ -9,9 +9,11 @@ import { formatUSD, round2, toNum } from "@/lib/format";
 import {
   CONDITIONS,
   CONDITION_HELP,
+  type CatalogItem,
   type Condition,
   type InvoiceDetail,
   type LineItem,
+  type SaveResponse,
 } from "@/lib/types";
 
 // Editable row keeps quantity/rate as raw strings so the inputs allow free
@@ -24,6 +26,9 @@ interface EditableLineItem {
   condition: Condition;
   quantity: string;
   rate: string;
+  ndc?: string;
+  catalogId?: string;
+  category?: string;
 }
 
 let rowSeq = 0;
@@ -48,6 +53,9 @@ function toEditable(items: LineItem[]): EditableLineItem[] {
     condition: normalizeCondition(it.condition),
     quantity: it.quantity != null ? String(it.quantity) : "",
     rate: it.rate != null ? String(it.rate) : "",
+    ndc: it.ndc || undefined,
+    catalogId: it.catalogId || undefined,
+    category: it.category || undefined,
   }));
 }
 
@@ -59,7 +67,7 @@ function blankRow(): EditableLineItem {
     expiry: "",
     condition: "MINT",
     quantity: "1",
-    rate: "0",
+    rate: "",
   };
 }
 
@@ -79,10 +87,8 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceDate, setInvoiceDate] = useState("");
   const [items, setItems] = useState<EditableLineItem[]>([]);
-  const [sendToCustomer, setSendToCustomer] = useState(true);
 
   const [status, setStatus] = useState("");
-  const [poLink, setPoLink] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -94,11 +100,9 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       setLoading(true);
       setLoadError(null);
       try {
-        const res = await fetch("/api/po/get", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ submissionId }),
-        });
+        const res = await fetch(
+          `/api/po/get?submissionId=${encodeURIComponent(submissionId)}`
+        );
         const data = (await res.json().catch(() => ({}))) as
           | (InvoiceDetail & { error?: string })
           | { error?: string };
@@ -107,7 +111,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         if (!res.ok) {
           setLoadError(
             (data as { error?: string }).error ||
-              "Failed to load this purchase order."
+              "Failed to load this invoice."
           );
           return;
         }
@@ -162,6 +166,26 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     markDirty();
   }
 
+  function addFromCatalog(cat: CatalogItem, condition: Condition) {
+    const price = cat.prices[condition];
+    setItems((cur) => [
+      ...cur,
+      {
+        id: newRowId(),
+        drug: cat.drug,
+        strength: cat.strength,
+        expiry: "",
+        condition,
+        quantity: "1",
+        rate: price == null ? "" : String(price),
+        ndc: cat.ndc || undefined,
+        catalogId: cat.catalogId || undefined,
+        category: cat.category || undefined,
+      },
+    ]);
+    markDirty();
+  }
+
   function setMeta(setter: (v: string) => void, value: string) {
     setter(value);
     markDirty();
@@ -177,46 +201,50 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     router.push("/");
   }
 
-  async function approve() {
+  async function save() {
     setSaving(true);
     try {
-      const lineItems: LineItem[] = items.map((it) => ({
-        drug: it.drug.trim(),
-        strength: it.strength.trim(),
-        expiry: it.expiry.trim(),
-        condition: it.condition,
-        quantity: toNum(it.quantity),
-        rate: toNum(it.rate),
-        amount: lineAmount(it),
-      }));
+      const lineItems: LineItem[] = items.map((it) => {
+        const drug = it.drug.trim();
+        const strength = it.strength.trim();
+        const quantity = toNum(it.quantity);
+        const rate = toNum(it.rate);
+        const li: LineItem = {
+          item: `${drug} ${strength}`.trim(),
+          drug,
+          strength,
+          expiry: it.expiry.trim(),
+          condition: it.condition,
+          quantity,
+          rate,
+          amount: round2(quantity * rate),
+        };
+        if (it.ndc) li.ndc = it.ndc;
+        if (it.catalogId) li.catalogId = it.catalogId;
+        if (it.category) li.category = it.category;
+        return li;
+      });
 
-      const res = await fetch("/api/po/approve", {
+      const res = await fetch("/api/po/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           submissionId,
           invoiceNumber,
           invoiceDate,
-          sendToCustomer,
           lineItems,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        total?: number;
-        poLink?: string;
-        error?: string;
-      };
+      const data = (await res.json().catch(() => ({}))) as SaveResponse;
 
       if (!res.ok || !data.ok) {
-        toast("error", data.error || "Approve failed. Your edits are preserved.");
+        toast("error", data.error || "Save failed. Your edits are preserved.");
         return;
       }
 
-      setPoLink(typeof data.poLink === "string" ? data.poLink : null);
-      setStatus("Approved");
       setDirty(false);
-      toast("success", "Purchase order approved and saved.");
+      const savedTotal = typeof data.total === "number" ? data.total : total;
+      toast("success", `Saved to sheet · ${formatUSD(savedTotal)}`);
     } catch {
       toast("error", "Network error. Your edits are preserved.");
     } finally {
@@ -229,7 +257,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       <main className="mx-auto max-w-5xl px-4 py-16">
         <div className="flex items-center justify-center gap-2 text-sm text-slate-500">
           <Spinner className="h-5 w-5 text-slate-400" />
-          Loading purchase order…
+          Loading invoice…
         </div>
       </main>
     );
@@ -321,6 +349,9 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         </div>
       </section>
 
+      {/* Add from catalog */}
+      <CatalogPicker onAdd={addFromCatalog} />
+
       {/* Line items */}
       <section className="mt-4 rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
@@ -330,7 +361,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
             onClick={addItem}
             className="rounded-md border border-brand-200 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-700 transition hover:bg-brand-100"
           >
-            + Add line item
+            + Add blank line item
           </button>
         </div>
 
@@ -355,7 +386,8 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                     colSpan={8}
                     className="px-3 py-8 text-center text-sm text-slate-400"
                   >
-                    No line items. Click “Add line item” to start.
+                    No line items. Add one from the catalog above or click “Add
+                    blank line item”.
                   </td>
                 </tr>
               ) : (
@@ -425,6 +457,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                           type="text"
                           inputMode="decimal"
                           value={it.rate}
+                          placeholder="0.00"
                           onChange={(e) =>
                             updateItem(it.id, { rate: e.target.value })
                           }
@@ -465,53 +498,158 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       </section>
 
       {/* Actions */}
-      <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <label className="flex items-center gap-3">
-          <input
-            type="checkbox"
-            checked={sendToCustomer}
-            onChange={(e) => setSendToCustomer(e.target.checked)}
-            className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-          />
-          <span className="text-sm text-slate-700">
-            Send finalized PO to customer on approve
-          </span>
-        </label>
-
-        <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            {poLink && (
-              <a
-                href={poLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
-              >
-                View finalized PO ↗
-              </a>
-            )}
-          </div>
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={goBack}
-              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-            >
-              Back
-            </button>
-            <button
-              type="button"
-              onClick={approve}
-              disabled={saving}
-              className="flex items-center justify-center gap-2 rounded-md bg-brand-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:opacity-50"
-            >
-              {saving && <Spinner />}
-              {saving ? "Approving…" : "Approve & Save"}
-            </button>
-          </div>
-        </div>
+      <section className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+        <button
+          type="button"
+          onClick={goBack}
+          className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+        >
+          Back
+        </button>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="flex items-center justify-center gap-2 rounded-md bg-brand-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:opacity-50"
+        >
+          {saving && <Spinner />}
+          {saving ? "Saving…" : "Save to sheet"}
+        </button>
       </section>
     </main>
+  );
+}
+
+function CatalogPicker({
+  onAdd,
+}: {
+  onAdd: (cat: CatalogItem, condition: Condition) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [catalog, setCatalog] = useState<CatalogItem[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const ensureCatalog = useCallback(async () => {
+    if (catalog || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/catalog");
+      const data = (await res.json().catch(() => ({}))) as {
+        items?: CatalogItem[];
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(data.error || "Failed to load catalog.");
+        return;
+      }
+      setCatalog(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setError("Network error while loading the catalog.");
+    } finally {
+      setLoading(false);
+    }
+  }, [catalog, loading]);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q || !catalog) return [];
+    const tokens = q.split(/\s+/);
+    return catalog
+      .filter((c) => {
+        const hay = `${c.drug} ${c.strength} ${c.category} ${c.ndc}`.toLowerCase();
+        return tokens.every((t) => hay.includes(t));
+      })
+      .slice(0, 50);
+  }, [query, catalog]);
+
+  return (
+    <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-slate-700">Add from catalog</h2>
+        {loading && <Spinner className="h-4 w-4 text-slate-400" />}
+      </div>
+
+      <input
+        type="text"
+        value={query}
+        onFocus={ensureCatalog}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Type a few letters of a drug…"
+        className="mt-3 w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
+      />
+
+      {error && (
+        <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          {error}
+        </p>
+      )}
+
+      {query.trim() && !loading && !error && (
+        <div className="mt-3 max-h-72 overflow-y-auto rounded-lg border border-slate-200">
+          {matches.length === 0 ? (
+            <div className="px-3 py-6 text-center text-sm text-slate-400">
+              No catalog matches.
+            </div>
+          ) : (
+            matches.map((cat, i) => (
+              <div
+                key={`${cat.catalogId || cat.ndc || cat.drug}-${i}`}
+                className="flex items-center justify-between gap-3 border-t border-slate-100 px-3 py-2 first:border-t-0"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate font-medium text-slate-800">
+                      {cat.drug || "—"}
+                    </span>
+                    {cat.strength && (
+                      <span className="text-slate-500">{cat.strength}</span>
+                    )}
+                    {cat.isGroup && (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                        Group · blanket
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 truncate text-xs text-slate-400">
+                    {[cat.category, cat.ndc].filter(Boolean).join(" · ") || "—"}
+                  </div>
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  {CONDITIONS.map((c) => {
+                    const p = cat.prices[c];
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => onAdd(cat, c)}
+                        title={
+                          p == null
+                            ? `Add as ${c} (set rate)`
+                            : `Add as ${c} at ${formatUSD(p)}`
+                        }
+                        className="rounded-md border border-slate-200 px-2 py-1 text-xs transition hover:border-brand-400 hover:bg-brand-50"
+                      >
+                        <span className="font-semibold text-slate-700">{c}</span>
+                        <span className="ml-1 text-slate-500">
+                          {p == null ? "—" : formatUSD(p)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      <p className="mt-2 text-xs text-slate-400">
+        Pick a condition to add the item. Blank ( — ) prices add an editable row
+        with no rate set.
+      </p>
+    </section>
   );
 }
 

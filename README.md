@@ -9,12 +9,12 @@ That is the whole job: **read sheet + catalog → edit → write sheet.** There 
 ## Architecture
 
 ```
-Browser (founder)  ->  Next.js Route Handlers (/app/api/*)  ->  Google Sheets API (read/write)
-                                                           ->  Catalog feed URL  (read-only JSON)
+Browser (founder)  ->  Next.js Route Handlers (/app/api/*)  ->  Submissions Google Sheet (read/write)
+                                                           ->  Catalog Google Sheet    (read-only)
 ```
 
-- All Google Sheets access and the catalog fetch happen **server-side** in route handlers. The browser only calls same-origin `/api/*`.
-- No service-account key, sheet ID, catalog URL, passcode, or session secret ever reaches the client bundle (nothing is prefixed `NEXT_PUBLIC_`).
+- Both the Submissions sheet and the catalog sheet are read through the **same service account**, **server-side** in route handlers. The browser only calls same-origin `/api/*`.
+- No service-account key, sheet IDs, passcode, or session secret ever reaches the client bundle (nothing is prefixed `NEXT_PUBLIC_`).
 
 ### Tech stack
 - Next.js (App Router) + TypeScript + Tailwind CSS
@@ -70,21 +70,23 @@ Columns are resolved by **header name** (read from the first row), not by fixed 
 | `Line Item Count` | written on save (= number of line items) |
 | `DateTime` | left as-is; used to sort results most-recent first |
 
-An **invoice** is a row whose `Line Items JSON` is a non-empty array. Rows without line items do not appear in search results.
+**Search returns any submission** whose `Vendor Name` or `GHL Contact ID` matches the query — **whether or not it already has line items**. Most submissions arrive with an `Estimated Total` but no structured line items; Landon builds the invoice by adding items from the catalog. When a row has no `Line Items JSON`, the search result shows the customer's `Estimated Total`; otherwise it shows the sum of the line items.
 
 **Saving** updates only these cells of the matched row (found by `Submission ID`): `Line Items JSON`, `Line Item Count`, `Estimated Total`, `Invoice Number`, `Invoice Date`. All other columns are left untouched.
 
-## Catalog feed — connection & rules
+## Catalog — connection & rules
 
-- A live JSON feed served from a Google Apps Script web app (`CATALOG_FEED_URL`), fetched server-side and cached in memory for ~5 minutes.
-- All feed-shape knowledge lives in **one** function, `normalizeCatalogItem()` in `lib/catalog.ts`, which maps each raw row to:
+- The catalog is a **Google Sheet** (`CATALOG_SHEET_ID`, tab via `CATALOG_SHEET_GID` or `CATALOG_SHEET_TAB`), read through the **same service account** as the Submissions sheet and cached in memory for ~5 minutes. Share it with the service-account `client_email` (Viewer is enough).
+- Expected columns (resolved by header name, order-independent): `id`, `label`, `drug`, `ndc`, `isGroup` (checkbox), `category`, `Mint 9m+`, `Ding 6-8m`, `Damage 3-5m`, `notes`.
+- All sheet-shape knowledge lives in **one** function, `normalizeCatalogItem()` in `lib/catalog.ts`, which maps each row to:
   ```ts
   { catalogId, ndc, drug, strength, category, isGroup,
     prices: { MINT: number | null, DING: number | null, DAMAGE: number | null } }
   ```
-  If the live feed's field or price-key names differ, adjust that one function.
+  If the catalog's column or price-header names differ, adjust that one function.
+- **Strength is derived from `label`.** There is no separate strength column, so `strength` is the `label` with the leading drug name stripped (so `drug + ' ' + strength` reconstructs the label).
 - **Null price = editable blank.** A condition with no price comes through as `null` and is rendered blank — **never `$0`** — and stays editable.
-- **Group rows are blanket deals.** Rows flagged `isGroup` (label ends in `— All`, synthetic NDC ending `-99`) are shown but clearly marked.
+- **Group rows are blanket deals.** Rows where `isGroup` is checked (or label ends in `— All`, or NDC ends `-99`) are shown but clearly marked.
 
 ## Line item rules
 - Fields: `drug`, `strength`, `expiry` (free text), `condition`, `quantity`, `rate`, `amount`, plus optional `item`, `ndc`, `catalogId`, `category`.
@@ -101,8 +103,10 @@ Copy `.env.example` to `.env.local` for local development and set the same value
 | --- | --- | --- |
 | `SHEET_ID` | yes | Spreadsheet ID, e.g. `1BLGlj9u0iAtdvqBgfxv9YE4HwvBP5YUV0C8DA8OqF_E` |
 | `SHEET_TAB` | yes | Worksheet/tab name (default `Submissions`) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | yes | Full service-account key JSON as one string. Share the sheet to its `client_email` as Editor |
-| `CATALOG_FEED_URL` | yes | Apps Script web-app JSON feed URL |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | yes | Full service-account key JSON as one string. Share **both** sheets to its `client_email` |
+| `CATALOG_SHEET_ID` | yes | Spreadsheet ID of the catalog workbook |
+| `CATALOG_SHEET_GID` | yes* | The catalog tab's gid (number after `#gid=` in the URL). *Or set `CATALOG_SHEET_TAB` instead |
+| `CATALOG_SHEET_TAB` | no | Catalog tab name; alternative to `CATALOG_SHEET_GID` |
 | `APP_PASSCODE` | yes | The founder's login passcode |
 | `SESSION_SECRET` | yes | Random string used to sign the session cookie (`openssl rand -hex 32`) |
 
@@ -112,7 +116,7 @@ Copy `.env.example` to `.env.local` for local development and set the same value
 1. In Google Cloud Console, create (or pick) a project and **enable the Google Sheets API**.
 2. Create a **Service Account**, then create a **JSON key** for it and download the file.
 3. Put the entire JSON file contents into `GOOGLE_SERVICE_ACCOUNT_JSON` (one line is fine; `\n` inside `private_key` is handled).
-4. Open the spreadsheet → **Share** → add the service account's `client_email` as **Editor**.
+4. **Share both sheets** with the service account's `client_email`: the Submissions sheet as **Editor**, the catalog sheet as **Viewer** (Editor is fine too).
 
 ## Local development
 

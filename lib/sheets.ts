@@ -218,26 +218,32 @@ export async function searchSubmissions(query: string): Promise<SearchResult[]> 
   const matches: { result: SearchResult; dateTime: string; order: number }[] = [];
 
   rows.forEach((row, order) => {
-    const lineItems = parseLineItems(cell(row, col.lineItemsJson));
-    // Only rows that actually have line items are editable invoices.
-    if (lineItems.length === 0) return;
+    const submissionId = cell(row, col.submissionId).trim();
+    if (!submissionId) return;
 
     const contactId = cell(row, col.contactId);
     const vendorName = cell(row, col.vendorName);
     const haystack = `${contactId} ${vendorName}`.toLowerCase();
     if (!haystack.includes(q)) return;
 
+    // A submission may have no line items yet — Landon builds the invoice from
+    // the catalog. Fall back to the customer's Estimated Total for display.
+    const lineItems = parseLineItems(cell(row, col.lineItemsJson));
+    const total = lineItems.length
+      ? lineItemsTotal(lineItems)
+      : toNum(cell(row, col.estimatedTotal).replace(/[$,]/g, ""));
+
     matches.push({
       order,
       dateTime: cell(row, col.dateTime),
       result: {
-        submissionId: cell(row, col.submissionId),
+        submissionId,
         contactId,
         vendorName,
         email: cell(row, col.email),
         invoiceNumber: cell(row, col.invoiceNumber),
         invoiceDate: cell(row, col.invoiceDate),
-        total: lineItemsTotal(lineItems),
+        total,
         status: cell(row, col.status),
         lineItemCount: lineItems.length,
       },
@@ -359,4 +365,61 @@ export async function saveSubmission(payload: SavePayload): Promise<number> {
   });
 
   return total;
+}
+
+// --- Generic reader -------------------------------------------------------
+// Used by the catalog module to read an arbitrary spreadsheet/tab through the
+// same service account. Lives here so all Sheets API access stays in one file.
+
+// Resolves a tab's title from its numeric gid via spreadsheet metadata.
+async function resolveSheetTitleByGid(
+  spreadsheetId: string,
+  gid: number
+): Promise<string> {
+  const sheets = getSheets();
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(sheetId,title))",
+  });
+  const match = (res.data.sheets ?? []).find(
+    (s) => s.properties?.sheetId === gid
+  );
+  const title = match?.properties?.title;
+  if (!title) {
+    throw new Error(`No tab with gid ${gid} found in that spreadsheet`);
+  }
+  return title;
+}
+
+// Reads an arbitrary tab as an array of { header: value } row objects (header
+// taken from row 1). Identify the tab by name (`tab`) or numeric `gid`.
+export async function readSheetRows(
+  spreadsheetId: string,
+  opts: { tab?: string; gid?: number }
+): Promise<Record<string, string>[]> {
+  let tab = opts.tab?.trim();
+  if (!tab && opts.gid != null) {
+    tab = await resolveSheetTitleByGid(spreadsheetId, opts.gid);
+  }
+  if (!tab) {
+    throw new Error("readSheetRows requires a tab name or gid");
+  }
+
+  const sheets = getSheets();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${tab}'`,
+  });
+  const values = (res.data.values as string[][] | undefined) ?? [];
+  if (values.length < 2) return [];
+
+  const [header, ...rows] = values;
+  const keys = header.map((h) => String(h ?? "").trim());
+  return rows.map((row) => {
+    const obj: Record<string, string> = {};
+    keys.forEach((k, i) => {
+      if (k) obj[k] = row[i] == null ? "" : String(row[i]);
+    });
+    return obj;
+  });
 }

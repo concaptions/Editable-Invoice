@@ -1,22 +1,37 @@
-// Live product-catalog feed access.
+// Live product-catalog access.
 //
-// The catalog is a read-only JSON feed served from a Google Apps Script web app
-// (env CATALOG_FEED_URL) — the same feed the customer form uses (~700 rows).
-// It is fetched server-side and cached in memory for ~5 minutes.
+// The catalog lives in a Google Sheet (env CATALOG_SHEET_ID + CATALOG_SHEET_GID,
+// or CATALOG_SHEET_TAB), read server-side through the same service account as the
+// Submissions sheet and cached in memory for ~5 minutes.
 //
-// ALL feed-shape knowledge lives in normalizeCatalogItem(): if the live feed's
-// field or price-key names change, edit that one function. The rest of the app
-// depends only on the normalized CatalogItem shape.
+// ALL sheet-shape knowledge lives in normalizeCatalogItem(): if the catalog's
+// column or price-header names change, edit that one function. The rest of the
+// app depends only on the normalized CatalogItem shape.
 
 import "server-only";
 import type { CatalogItem } from "./types";
+import { readSheetRows } from "./sheets";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-function feedUrl(): string {
-  const url = process.env.CATALOG_FEED_URL;
-  if (!url) throw new Error("CATALOG_FEED_URL is not set");
-  return url;
+function catalogSheetId(): string {
+  const id = process.env.CATALOG_SHEET_ID;
+  if (!id) throw new Error("CATALOG_SHEET_ID is not set");
+  return id;
+}
+
+// The catalog tab, by gid (the number after #gid= in the sheet URL).
+function catalogGid(): number | undefined {
+  const raw = process.env.CATALOG_SHEET_GID;
+  if (!raw || !raw.trim()) return undefined;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// Optional: identify the catalog tab by name instead of gid.
+function catalogTab(): string | undefined {
+  const t = process.env.CATALOG_SHEET_TAB;
+  return t && t.trim() ? t.trim() : undefined;
 }
 
 type RawRow = Record<string, unknown>;
@@ -59,8 +74,8 @@ function parsePrice(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-// Finds the price cell for a condition. Price keys contain spaces + an expiry
-// window (e.g. "Mint Price (9m+)"), so we match by keyword on the bracket key.
+// Finds the price cell for a condition. Price headers contain the condition plus
+// an expiry window (e.g. "Mint 9m+", "Ding 6-8m"), so we match by keyword.
 function readPrice(raw: RawRow, keyword: string): number | null {
   // Support a nested prices object too: { prices: { MINT: 60 } }.
   const nested = raw.prices;
@@ -84,10 +99,10 @@ function readPrice(raw: RawRow, keyword: string): number | null {
 function truthy(value: unknown): boolean {
   if (value === true) return true;
   const s = String(value ?? "").trim().toLowerCase();
-  return s === "true" || s === "1" || s === "yes";
+  return s === "true" || s === "1" || s === "yes" || s === "✓" || s === "✔";
 }
 
-// THE single place that maps a raw feed row to the normalized CatalogItem shape.
+// THE single place that maps a raw catalog row to the normalized CatalogItem.
 export function normalizeCatalogItem(raw: RawRow): CatalogItem {
   const catalogId = readString(
     raw,
@@ -100,11 +115,26 @@ export function normalizeCatalogItem(raw: RawRow): CatalogItem {
     ["drug", "drugName", "Drug Name", "name", "product", "Product", "medication"],
     ["drug", "product", "name", "medication"]
   );
-  const strength = readString(
+  const label =
+    readString(raw, ["label", "Label", "displayName", "description"], ["label"]) ||
+    drug;
+
+  // No dedicated strength column in the catalog: the strength/pack lives inside
+  // the label (e.g. "Aptiom 200 200mg, 30 count"). Derive it by stripping the
+  // leading drug name so `drug + ' ' + strength` reconstructs the label.
+  let strength = readString(
     raw,
     ["strength", "Strength", "dose", "dosage"],
     ["strength", "dosage", "dose"]
   );
+  if (!strength && label) {
+    const d = drug.trim();
+    strength =
+      d && label.toLowerCase().startsWith(d.toLowerCase())
+        ? label.slice(d.length).replace(/^[\s,–—-]+/, "").trim()
+        : label.trim();
+  }
+
   const category = readString(
     raw,
     [
@@ -120,7 +150,6 @@ export function normalizeCatalogItem(raw: RawRow): CatalogItem {
     ["category", "delivery", "method", "form", "type"]
   );
 
-  const label = readString(raw, ["label", "Label", "displayName"], ["label"]) || drug;
   const isGroup =
     truthy(raw.isGroup ?? raw.is_group ?? raw.group) ||
     /[-—]\s*all$/i.test(label.trim()) ||
@@ -141,28 +170,17 @@ export function normalizeCatalogItem(raw: RawRow): CatalogItem {
   };
 }
 
-function extractRows(payload: unknown): RawRow[] {
-  if (Array.isArray(payload)) return payload as RawRow[];
-  if (payload && typeof payload === "object") {
-    const obj = payload as RawRow;
-    for (const key of ["items", "products", "rows", "data", "catalog", "results"]) {
-      const v = obj[key];
-      if (Array.isArray(v)) return v as RawRow[];
-    }
-  }
-  return [];
-}
-
 let cache: { items: CatalogItem[]; fetchedAt: number } | null = null;
 let inflight: Promise<CatalogItem[]> | null = null;
 
 async function fetchCatalog(): Promise<CatalogItem[]> {
-  const res = await fetch(feedUrl(), { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`Catalog feed returned ${res.status}`);
-  }
-  const payload = (await res.json()) as unknown;
-  return extractRows(payload).map(normalizeCatalogItem);
+  const rows = await readSheetRows(catalogSheetId(), {
+    tab: catalogTab(),
+    gid: catalogGid(),
+  });
+  return rows
+    .map((r) => normalizeCatalogItem(r as RawRow))
+    .filter((it) => it.drug || it.ndc || it.catalogId);
 }
 
 export async function getCatalog(): Promise<CatalogItem[]> {

@@ -22,6 +22,9 @@ export interface LineItem {
   ndc?: string;
   catalogId?: string;
   category?: string;
+  // Per-condition catalog prices captured when the item was added from the
+  // catalog, so changing `condition` can re-fill `rate` without a price lookup.
+  prices?: CatalogPrices;
 }
 
 // A single row returned by /api/po/search.

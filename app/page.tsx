@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Spinner } from "@/components/Spinner";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatUSD } from "@/lib/format";
@@ -13,6 +13,49 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
+
+  const [recent, setRecent] = useState<SearchResult[]>([]);
+  const [recentLoading, setRecentLoading] = useState(true);
+  const [recentError, setRecentError] = useState<string | null>(null);
+
+  // Load the most recent submissions on mount so the founder can jump straight
+  // into one without searching.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/po/recent?limit=10");
+        const data = (await res.json().catch(() => ({}))) as {
+          results?: SearchResult[];
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok) {
+          setRecentError(data.error || "Couldn't load recent submissions.");
+          setRecent([]);
+        } else {
+          setRecent(Array.isArray(data.results) ? data.results : []);
+        }
+      } catch {
+        if (!cancelled) setRecentError("Network error loading recent submissions.");
+      } finally {
+        if (!cancelled) setRecentLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function onQueryChange(value: string) {
+    setQuery(value);
+    // Clearing the box returns to the recent list.
+    if (value.trim() === "") {
+      setSearched(false);
+      setResults([]);
+      setError(null);
+    }
+  }
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -54,7 +97,7 @@ export default function SearchPage() {
         <input
           type="text"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => onQueryChange(e.target.value)}
           placeholder="Search by vendor ID or name"
           className="w-full rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
         />
@@ -69,41 +112,77 @@ export default function SearchPage() {
       </form>
 
       <div className="mt-6">
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Spinner className="h-4 w-4 text-slate-400" />
-            Searching…
-          </div>
-        )}
+        {loading || searched ? (
+          <>
+            {loading && (
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Spinner className="h-4 w-4 text-slate-400" />
+                Searching…
+              </div>
+            )}
 
-        {!loading && error && (
-          <div
-            role="alert"
-            className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
-          >
-            {error}
-          </div>
-        )}
+            {!loading && error && (
+              <div
+                role="alert"
+                className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              >
+                {error}
+              </div>
+            )}
 
-        {!loading && !error && searched && results.length === 0 && (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-500">
-            No results found. Try a different vendor ID or name.
-          </div>
-        )}
+            {!loading && !error && results.length === 0 && (
+              <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-500">
+                No results found. Try a different vendor ID or name.
+              </div>
+            )}
 
-        {!loading && !error && results.length > 0 && (
-          <ul className="space-y-3">
-            {results.map((r) => (
-              <li key={r.submissionId}>
-                <ResultCard result={r} />
-              </li>
-            ))}
-          </ul>
-        )}
+            {!loading && !error && results.length > 0 && (
+              <ul className="space-y-3">
+                {results.map((r) => (
+                  <li key={r.submissionId}>
+                    <ResultCard result={r} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <div>
+            <h2 className="mb-3 text-sm font-semibold text-slate-700">
+              Recent submissions
+            </h2>
 
-        {!loading && !error && !searched && (
-          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">
-            Enter a vendor ID or name above to begin.
+            {recentLoading && (
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Spinner className="h-4 w-4 text-slate-400" />
+                Loading recent submissions…
+              </div>
+            )}
+
+            {!recentLoading && recentError && (
+              <div
+                role="alert"
+                className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              >
+                {recentError}
+              </div>
+            )}
+
+            {!recentLoading && !recentError && recent.length === 0 && (
+              <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">
+                No submissions yet.
+              </div>
+            )}
+
+            {!recentLoading && !recentError && recent.length > 0 && (
+              <ul className="space-y-3">
+                {recent.map((r) => (
+                  <li key={r.submissionId}>
+                    <ResultCard result={r} />
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </div>

@@ -10,6 +10,7 @@ import {
   CONDITIONS,
   CONDITION_HELP,
   type CatalogItem,
+  type CatalogPrices,
   type Condition,
   type InvoiceDetail,
   type LineItem,
@@ -29,6 +30,8 @@ interface EditableLineItem {
   ndc?: string;
   catalogId?: string;
   category?: string;
+  // Per-condition catalog prices, so changing condition re-fills the rate.
+  prices?: CatalogPrices;
 }
 
 let rowSeq = 0;
@@ -56,6 +59,7 @@ function toEditable(items: LineItem[]): EditableLineItem[] {
     ndc: it.ndc || undefined,
     catalogId: it.catalogId || undefined,
     category: it.category || undefined,
+    prices: it.prices || undefined,
   }));
 }
 
@@ -157,6 +161,20 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     setItems((cur) => cur.map((it) => (it.id === id ? { ...it, ...patch } : it)));
     markDirty();
   }
+  // Changing condition re-fills the rate from the catalog price for that
+  // condition (blank when the catalog has no price for it). Items added by hand
+  // have no price snapshot, so their rate is left untouched.
+  function changeCondition(id: string, condition: Condition) {
+    setItems((cur) =>
+      cur.map((it) => {
+        if (it.id !== id) return it;
+        if (!it.prices) return { ...it, condition };
+        const price = it.prices[condition];
+        return { ...it, condition, rate: price == null ? "" : String(price) };
+      })
+    );
+    markDirty();
+  }
   function removeItem(id: string) {
     setItems((cur) => cur.filter((it) => it.id !== id));
     markDirty();
@@ -181,6 +199,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         ndc: cat.ndc || undefined,
         catalogId: cat.catalogId || undefined,
         category: cat.category || undefined,
+        prices: cat.prices,
       },
     ]);
     markDirty();
@@ -222,6 +241,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         if (it.ndc) li.ndc = it.ndc;
         if (it.catalogId) li.catalogId = it.catalogId;
         if (it.category) li.category = it.category;
+        if (it.prices) li.prices = it.prices;
         return li;
       });
 
@@ -426,9 +446,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                       <select
                         value={it.condition}
                         onChange={(e) =>
-                          updateItem(it.id, {
-                            condition: e.target.value as Condition,
-                          })
+                          changeCondition(it.id, e.target.value as Condition)
                         }
                         className="w-full min-w-[100px] rounded-md border border-slate-300 bg-white px-2 py-1.5 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-200"
                       >

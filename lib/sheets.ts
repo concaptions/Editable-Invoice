@@ -12,6 +12,7 @@ import { google, type sheets_v4 } from "googleapis";
 import { round2, toNum } from "./format";
 import {
   CONDITIONS,
+  type CatalogPrices,
   type Condition,
   type InvoiceDetail,
   type LineItem,
@@ -133,6 +134,20 @@ function normalizeCondition(value: unknown): Condition {
     : "MINT";
 }
 
+// Parses an optional per-condition price snapshot ({ MINT, DING, DAMAGE }).
+// Returns undefined when absent so items without a snapshot stay lean; a
+// present-but-empty condition price is kept as null (an editable blank).
+function parsePrices(value: unknown): CatalogPrices | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const o = value as Record<string, unknown>;
+  const pick = (v: unknown): number | null => {
+    if (v == null || v === "") return null;
+    const n = typeof v === "number" ? v : parseFloat(String(v).replace(/[$,\s]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  };
+  return { MINT: pick(o.MINT), DING: pick(o.DING), DAMAGE: pick(o.DAMAGE) };
+}
+
 // Parses the `Line Items JSON` cell into normalized line items (amount derived).
 function parseLineItems(raw: string): LineItem[] {
   if (!raw || !raw.trim()) return [];
@@ -165,6 +180,8 @@ function parseLineItems(raw: string): LineItem[] {
     if (typeof o.ndc === "string" && o.ndc) item.ndc = o.ndc;
     if (typeof o.catalogId === "string" && o.catalogId) item.catalogId = o.catalogId;
     if (typeof o.category === "string" && o.category) item.category = o.category;
+    const prices = parsePrices(o.prices);
+    if (prices) item.prices = prices;
     return item;
   });
 }
@@ -206,6 +223,51 @@ function compareRecency(a: string, b: string): number {
   return 0;
 }
 
+// Builds the display result for one row, or null if it has no Submission ID.
+function rowToSearchResult(row: string[], col: ColumnIndex): SearchResult | null {
+  const submissionId = cell(row, col.submissionId).trim();
+  if (!submissionId) return null;
+
+  // A submission may have no line items yet — Landon builds the invoice from
+  // the catalog. Fall back to the customer's Estimated Total for display.
+  const lineItems = parseLineItems(cell(row, col.lineItemsJson));
+  const total = lineItems.length
+    ? lineItemsTotal(lineItems)
+    : toNum(cell(row, col.estimatedTotal).replace(/[$,]/g, ""));
+
+  return {
+    submissionId,
+    contactId: cell(row, col.contactId),
+    vendorName: cell(row, col.vendorName),
+    email: cell(row, col.email),
+    invoiceNumber: cell(row, col.invoiceNumber),
+    invoiceDate: cell(row, col.invoiceDate),
+    total,
+    status: cell(row, col.status),
+    lineItemCount: lineItems.length,
+  };
+}
+
+// Collects matching rows (optionally filtered), most-recent first.
+function collectResults(
+  rows: string[][],
+  col: ColumnIndex,
+  predicate?: (row: string[]) => boolean
+): SearchResult[] {
+  const ranked: { result: SearchResult; dateTime: string; order: number }[] = [];
+  rows.forEach((row, order) => {
+    if (predicate && !predicate(row)) return;
+    const result = rowToSearchResult(row, col);
+    if (!result) return;
+    ranked.push({ result, dateTime: cell(row, col.dateTime), order });
+  });
+  ranked.sort((a, b) => {
+    const byDate = compareRecency(a.dateTime, b.dateTime);
+    return byDate !== 0 ? byDate : b.order - a.order;
+  });
+  return ranked.map((m) => m.result);
+}
+
 export async function searchSubmissions(query: string): Promise<SearchResult[]> {
   const q = query.trim().toLowerCase();
   if (!q) return [];
@@ -215,47 +277,21 @@ export async function searchSubmissions(query: string): Promise<SearchResult[]> 
     throw new Error('Sheet is missing the "Submission ID" column');
   }
 
-  const matches: { result: SearchResult; dateTime: string; order: number }[] = [];
-
-  rows.forEach((row, order) => {
-    const submissionId = cell(row, col.submissionId).trim();
-    if (!submissionId) return;
-
-    const contactId = cell(row, col.contactId);
-    const vendorName = cell(row, col.vendorName);
-    const haystack = `${contactId} ${vendorName}`.toLowerCase();
-    if (!haystack.includes(q)) return;
-
-    // A submission may have no line items yet — Landon builds the invoice from
-    // the catalog. Fall back to the customer's Estimated Total for display.
-    const lineItems = parseLineItems(cell(row, col.lineItemsJson));
-    const total = lineItems.length
-      ? lineItemsTotal(lineItems)
-      : toNum(cell(row, col.estimatedTotal).replace(/[$,]/g, ""));
-
-    matches.push({
-      order,
-      dateTime: cell(row, col.dateTime),
-      result: {
-        submissionId,
-        contactId,
-        vendorName,
-        email: cell(row, col.email),
-        invoiceNumber: cell(row, col.invoiceNumber),
-        invoiceDate: cell(row, col.invoiceDate),
-        total,
-        status: cell(row, col.status),
-        lineItemCount: lineItems.length,
-      },
-    });
+  return collectResults(rows, col, (row) => {
+    const haystack =
+      `${cell(row, col.contactId)} ${cell(row, col.vendorName)}`.toLowerCase();
+    return haystack.includes(q);
   });
+}
 
-  matches.sort((a, b) => {
-    const byDate = compareRecency(a.dateTime, b.dateTime);
-    return byDate !== 0 ? byDate : b.order - a.order;
-  });
-
-  return matches.map((m) => m.result);
+// Most-recent submissions for the home screen (no search query needed).
+export async function getRecentSubmissions(limit = 10): Promise<SearchResult[]> {
+  const { rows, col } = await readGrid();
+  if (col.submissionId == null) {
+    throw new Error('Sheet is missing the "Submission ID" column');
+  }
+  const results = collectResults(rows, col);
+  return limit > 0 ? results.slice(0, limit) : results;
 }
 
 export async function getSubmission(
@@ -334,6 +370,8 @@ export async function saveSubmission(payload: SavePayload): Promise<number> {
       item.catalogId = raw.catalogId;
     if (typeof raw.category === "string" && raw.category)
       item.category = raw.category;
+    const prices = parsePrices(raw.prices);
+    if (prices) item.prices = prices;
     return item;
   });
 

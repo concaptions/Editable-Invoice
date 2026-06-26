@@ -1,12 +1,13 @@
 // Live product-catalog access.
 //
-// The catalog lives in a Google Sheet (env CATALOG_SHEET_ID + CATALOG_SHEET_GID,
-// or CATALOG_SHEET_TAB), read server-side through the same service account as the
-// Submissions sheet and cached in memory for ~5 minutes.
+// The catalog is fetched from a Google Apps Script web app (CATALOG_FEED_URL
+// below) that reads the Rx Product sheet and returns it already cleaned and
+// grouped as JSON. Cached in memory for ~5 minutes so we don't hit the feed on
+// every request.
 //
-// ALL sheet-shape knowledge lives in normalizeCatalogItem(): if the catalog's
-// column or price-header names change, edit that one function. The rest of the
-// app depends only on the normalized CatalogItem shape.
+// ALL feed-shape knowledge lives in normalizeCatalogItem(): if the feed's field
+// or price-key names change, edit that one function. The rest of the app depends
+// only on the normalized CatalogItem shape.
 
 import "server-only";
 import type { CatalogItem } from "./types";

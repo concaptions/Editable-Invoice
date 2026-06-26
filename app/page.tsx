@@ -1,30 +1,36 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { Spinner } from "@/components/Spinner";
 import { StatusBadge } from "@/components/StatusBadge";
 import { formatUSD } from "@/lib/format";
 import type { SearchResult } from "@/lib/types";
 
 export default function SearchPage() {
+  const router = useRouter();
+
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [searched, setSearched] = useState(false);
+  const [open, setOpen] = useState(false);
 
   const [recent, setRecent] = useState<SearchResult[]>([]);
   const [recentLoading, setRecentLoading] = useState(true);
   const [recentError, setRecentError] = useState<string | null>(null);
 
-  // Load the most recent submissions on mount so the founder can jump straight
-  // into one without searching.
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const q = query.trim();
+  const searching = q.length > 0;
+
+  // Load the 20 most recent submissions on mount for the dropdown.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/po/recent?limit=10");
+        const res = await fetch("/api/po/recent?limit=20");
         const data = (await res.json().catch(() => ({}))) as {
           results?: SearchResult[];
           error?: string;
@@ -32,7 +38,6 @@ export default function SearchPage() {
         if (cancelled) return;
         if (!res.ok) {
           setRecentError(data.error || "Couldn't load recent submissions.");
-          setRecent([]);
         } else {
           setRecent(Array.isArray(data.results) ? data.results : []);
         }
@@ -47,142 +52,116 @@ export default function SearchPage() {
     };
   }, []);
 
-  function onQueryChange(value: string) {
-    setQuery(value);
-    // Clearing the box returns to the recent list.
-    if (value.trim() === "") {
-      setSearched(false);
+  // Live search (debounced) across name / email / Telegram / contact ID.
+  useEffect(() => {
+    if (!q) {
       setResults([]);
-      setError(null);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
     }
-  }
-
-  async function onSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const q = query.trim();
-    if (!q) return;
-
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/po/search?q=${encodeURIComponent(q)}`);
-      const data = (await res.json().catch(() => ({}))) as {
-        results?: SearchResult[];
-        error?: string;
-      };
-
-      if (!res.ok) {
-        setError(data.error || "Search failed. Please try again.");
+    setSearchLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/po/search?q=${encodeURIComponent(q)}`);
+        const data = (await res.json().catch(() => ({}))) as {
+          results?: SearchResult[];
+          error?: string;
+        };
+        if (!res.ok) {
+          setSearchError(data.error || "Search failed. Please try again.");
+          setResults([]);
+        } else {
+          setSearchError(null);
+          setResults(Array.isArray(data.results) ? data.results : []);
+        }
+      } catch {
+        setSearchError("Network error. Please try again.");
         setResults([]);
-      } else {
-        setResults(Array.isArray(data.results) ? data.results : []);
+      } finally {
+        setSearchLoading(false);
       }
-    } catch {
-      setError("Network error. Please try again.");
-      setResults([]);
-    } finally {
-      setLoading(false);
-      setSearched(true);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Close the dropdown on outside click.
+  useEffect(() => {
+    function onPointerDown(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
     }
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, []);
+
+  function openInvoice(submissionId: string) {
+    setOpen(false);
+    router.push(`/po/${encodeURIComponent(submissionId)}`);
   }
+
+  const loading = searching ? searchLoading : recentLoading;
+  const error = searching ? searchError : recentError;
+  const list = searching ? results : recent;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
       <h1 className="text-2xl font-semibold text-slate-900">Purchase Orders</h1>
       <p className="mt-1 text-sm text-slate-500">
-        Find a submission to review, edit, and approve.
+        Pick a recent submission or search by name, email, Telegram, or vendor ID.
       </p>
 
-      <form onSubmit={onSubmit} className="mt-6 flex gap-2">
+      <div ref={containerRef} className="relative mt-6">
         <input
           type="text"
           value={query}
-          onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="Search by vendor ID or name"
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+          }}
+          placeholder="Search name, email, Telegram, or vendor ID — or click to see recent"
           className="w-full rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
         />
-        <button
-          type="submit"
-          disabled={loading || query.trim().length === 0}
-          className="flex shrink-0 items-center justify-center gap-2 rounded-md bg-brand-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:opacity-50"
-        >
-          {loading && <Spinner />}
-          {loading ? "Searching…" : "Search"}
-        </button>
-      </form>
 
-      <div className="mt-6">
-        {loading || searched ? (
-          <>
+        {open && (
+          <div className="absolute z-20 mt-2 max-h-[28rem] w-full overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg">
+            <div className="border-b border-slate-100 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              {searching ? "Search results" : "Recent submissions"}
+            </div>
+
             {loading && (
-              <div className="flex items-center gap-2 text-sm text-slate-500">
+              <div className="flex items-center gap-2 px-3 py-4 text-sm text-slate-500">
                 <Spinner className="h-4 w-4 text-slate-400" />
-                Searching…
+                {searching ? "Searching…" : "Loading recent submissions…"}
               </div>
             )}
 
             {!loading && error && (
-              <div
-                role="alert"
-                className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
-              >
-                {error}
+              <div className="px-3 py-4 text-sm text-rose-700">{error}</div>
+            )}
+
+            {!loading && !error && list.length === 0 && (
+              <div className="px-3 py-6 text-center text-sm text-slate-400">
+                {searching
+                  ? "No matches. Try an email, Telegram handle, or vendor ID."
+                  : "No submissions yet."}
               </div>
             )}
 
-            {!loading && !error && results.length === 0 && (
-              <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-500">
-                No results found. Try a different vendor ID or name.
-              </div>
-            )}
-
-            {!loading && !error && results.length > 0 && (
-              <ul className="space-y-3">
-                {results.map((r) => (
-                  <li key={r.submissionId}>
-                    <ResultCard result={r} />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        ) : (
-          <div>
-            <h2 className="mb-3 text-sm font-semibold text-slate-700">
-              Recent submissions
-            </h2>
-
-            {recentLoading && (
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <Spinner className="h-4 w-4 text-slate-400" />
-                Loading recent submissions…
-              </div>
-            )}
-
-            {!recentLoading && recentError && (
-              <div
-                role="alert"
-                className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
-              >
-                {recentError}
-              </div>
-            )}
-
-            {!recentLoading && !recentError && recent.length === 0 && (
-              <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-10 text-center text-sm text-slate-400">
-                No submissions yet.
-              </div>
-            )}
-
-            {!recentLoading && !recentError && recent.length > 0 && (
-              <ul className="space-y-3">
-                {recent.map((r) => (
-                  <li key={r.submissionId}>
-                    <ResultCard result={r} />
-                  </li>
-                ))}
-              </ul>
-            )}
+            {!loading &&
+              !error &&
+              list.map((r) => (
+                <SubmissionRow
+                  key={r.submissionId}
+                  result={r}
+                  onClick={() => openInvoice(r.submissionId)}
+                />
+              ))}
           </div>
         )}
       </div>
@@ -190,40 +169,42 @@ export default function SearchPage() {
   );
 }
 
-function ResultCard({ result }: { result: SearchResult }) {
+function SubmissionRow({
+  result,
+  onClick,
+}: {
+  result: SearchResult;
+  onClick: () => void;
+}) {
+  const identifiers = [result.email, result.telegram, result.contactId].filter(
+    Boolean
+  );
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center justify-between gap-3 border-t border-slate-100 px-3 py-2.5 text-left transition first:border-t-0 hover:bg-slate-50"
+    >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="truncate text-base font-semibold text-slate-900">
+          <span className="truncate text-sm font-semibold text-slate-900">
             {result.vendorName || "Unknown vendor"}
           </span>
           <StatusBadge status={result.status} />
         </div>
-        <div className="mt-1 font-mono text-xs text-slate-400">
-          {result.contactId || "—"}
+        <div className="mt-0.5 truncate text-xs text-slate-500">
+          {identifiers.length ? identifiers.join(" · ") : "—"}
         </div>
-        <div className="mt-1 text-xs text-slate-500">
+        <div className="mt-0.5 text-xs text-slate-400">
           {result.invoiceDate || "No date"}
           {typeof result.lineItemCount === "number" && (
             <> · {result.lineItemCount} item{result.lineItemCount === 1 ? "" : "s"}</>
           )}
         </div>
       </div>
-
-      <div className="flex items-center justify-between gap-4 sm:justify-end">
-        <div className="text-right">
-          <div className="text-lg font-semibold text-slate-900">
-            {formatUSD(result.total)}
-          </div>
-        </div>
-        <Link
-          href={`/po/${encodeURIComponent(result.submissionId)}`}
-          className="rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-brand-700"
-        >
-          Edit
-        </Link>
+      <div className="shrink-0 text-sm font-semibold text-slate-900">
+        {formatUSD(result.total)}
       </div>
-    </div>
+    </button>
   );
 }

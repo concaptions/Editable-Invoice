@@ -33,6 +33,7 @@ export interface SearchResult {
   contactId: string;
   vendorName: string;
   email: string;
+  telegram: string;
   invoiceNumber: string;
   invoiceDate: string;
   total: number;

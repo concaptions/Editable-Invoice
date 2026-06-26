@@ -97,6 +97,13 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
+  // Catalog is lifted here (rather than living inside CatalogPicker) so a
+  // condition change can re-price any catalog-linked row live — including rows
+  // loaded from the sheet that have no saved price snapshot.
+  const [catalog, setCatalog] = useState<CatalogItem[] | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+
   // Load the invoice on mount / when the id changes.
   useEffect(() => {
     let cancelled = false;
@@ -157,20 +164,65 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
 
   const markDirty = useCallback(() => setDirty(true), []);
 
+  const loadCatalog = useCallback(async () => {
+    if (catalog || catalogLoading) return;
+    setCatalogLoading(true);
+    setCatalogError(null);
+    try {
+      const res = await fetch("/api/catalog");
+      const data = (await res.json().catch(() => ({}))) as {
+        items?: CatalogItem[];
+        error?: string;
+      };
+      if (!res.ok) {
+        setCatalogError(data.error || "Failed to load catalog.");
+        return;
+      }
+      setCatalog(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setCatalogError("Network error while loading the catalog.");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [catalog, catalogLoading]);
+
+  // Eager-load the catalog so a condition change re-prices immediately, even
+  // before the catalog picker has been opened.
+  useEffect(() => {
+    loadCatalog();
+  }, [loadCatalog]);
+
+  const catalogById = useMemo(() => {
+    const m = new Map<string, CatalogItem>();
+    for (const c of catalog ?? []) if (c.catalogId) m.set(c.catalogId, c);
+    return m;
+  }, [catalog]);
+
   function updateItem(id: string, patch: Partial<EditableLineItem>) {
     setItems((cur) => cur.map((it) => (it.id === id ? { ...it, ...patch } : it)));
     markDirty();
   }
   // Changing condition re-fills the rate from the catalog price for that
-  // condition (blank when the catalog has no price for it). Items added by hand
-  // have no price snapshot, so their rate is left untouched.
+  // condition (blank when the catalog has no price for it). Prefers the item's
+  // saved price snapshot, falling back to a live catalog lookup by catalogId so
+  // rows loaded from the sheet re-price too. Hand-entered rows (no snapshot, no
+  // catalogId) keep their rate. The looked-up snapshot is stored on the row so
+  // later condition flips stay instant and the prices persist on save.
   function changeCondition(id: string, condition: Condition) {
     setItems((cur) =>
       cur.map((it) => {
         if (it.id !== id) return it;
-        if (!it.prices) return { ...it, condition };
-        const price = it.prices[condition];
-        return { ...it, condition, rate: price == null ? "" : String(price) };
+        const prices =
+          it.prices ??
+          (it.catalogId ? catalogById.get(it.catalogId)?.prices : undefined);
+        if (!prices) return { ...it, condition };
+        const price = prices[condition];
+        return {
+          ...it,
+          condition,
+          rate: price == null ? "" : String(price),
+          prices,
+        };
       })
     );
     markDirty();
@@ -370,7 +422,13 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       </section>
 
       {/* Add from catalog */}
-      <CatalogPicker onAdd={addFromCatalog} />
+      <CatalogPicker
+        catalog={catalog}
+        loading={catalogLoading}
+        error={catalogError}
+        onLoad={loadCatalog}
+        onAdd={addFromCatalog}
+      />
 
       {/* Line items */}
       <section className="mt-4 rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -539,36 +597,19 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
 }
 
 function CatalogPicker({
+  catalog,
+  loading,
+  error,
+  onLoad,
   onAdd,
 }: {
+  catalog: CatalogItem[] | null;
+  loading: boolean;
+  error: string | null;
+  onLoad: () => void;
   onAdd: (cat: CatalogItem, condition: Condition) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [catalog, setCatalog] = useState<CatalogItem[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const ensureCatalog = useCallback(async () => {
-    if (catalog || loading) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/catalog");
-      const data = (await res.json().catch(() => ({}))) as {
-        items?: CatalogItem[];
-        error?: string;
-      };
-      if (!res.ok) {
-        setError(data.error || "Failed to load catalog.");
-        return;
-      }
-      setCatalog(Array.isArray(data.items) ? data.items : []);
-    } catch {
-      setError("Network error while loading the catalog.");
-    } finally {
-      setLoading(false);
-    }
-  }, [catalog, loading]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -592,7 +633,7 @@ function CatalogPicker({
       <input
         type="text"
         value={query}
-        onFocus={ensureCatalog}
+        onFocus={onLoad}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Type a few letters of a drug…"
         className="mt-3 w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"

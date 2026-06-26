@@ -240,6 +240,7 @@ function rowToSearchResult(row: string[], col: ColumnIndex): SearchResult | null
     contactId: cell(row, col.contactId),
     vendorName: cell(row, col.vendorName),
     email: cell(row, col.email),
+    telegram: cell(row, col.telegram),
     invoiceNumber: cell(row, col.invoiceNumber),
     invoiceDate: cell(row, col.invoiceDate),
     total,
@@ -277,15 +278,23 @@ export async function searchSubmissions(query: string): Promise<SearchResult[]> 
     throw new Error('Sheet is missing the "Submission ID" column');
   }
 
+  // Vendors go by different names across invoice / messaging / our records, so
+  // match against every identifier we have, not just the vendor name.
   return collectResults(rows, col, (row) => {
-    const haystack =
-      `${cell(row, col.contactId)} ${cell(row, col.vendorName)}`.toLowerCase();
+    const haystack = [
+      cell(row, col.contactId),
+      cell(row, col.vendorName),
+      cell(row, col.email),
+      cell(row, col.telegram),
+    ]
+      .join(" ")
+      .toLowerCase();
     return haystack.includes(q);
   });
 }
 
 // Most-recent submissions for the home screen (no search query needed).
-export async function getRecentSubmissions(limit = 10): Promise<SearchResult[]> {
+export async function getRecentSubmissions(limit = 20): Promise<SearchResult[]> {
   const { rows, col } = await readGrid();
   if (col.submissionId == null) {
     throw new Error('Sheet is missing the "Submission ID" column');

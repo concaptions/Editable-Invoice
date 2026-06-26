@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
 
   const raw = request.nextUrl.searchParams.get("limit");
   const parsed = raw ? Number(raw) : NaN;
-  const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 50) : 10;
+  const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 50) : 20;
 
   try {
     const results = await getRecentSubmissions(limit);

@@ -10,28 +10,20 @@
 
 import "server-only";
 import type { CatalogItem } from "./types";
-import { readSheetRows } from "./sheets";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-function catalogSheetId(): string {
-  const id = process.env.CATALOG_SHEET_ID;
-  if (!id) throw new Error("CATALOG_SHEET_ID is not set");
-  return id;
-}
+// The catalog is served as JSON by a Google Apps Script web app that reads the
+// catalog sheet and emits already-normalized rows:
+//   { items: [{ id, label, drug, ndc, isGroup, category, prices: {...} }] }
+// Override with CATALOG_FEED_URL; the default is Landon's published endpoint so
+// the app works on Railway without extra env config.
+const DEFAULT_CATALOG_FEED_URL =
+  "https://script.google.com/macros/s/AKfycbyvHo-56_8Rq2nQxQM1aPtsLyVmC8YkM3wv_cwjIlGRXk-SKKJwU4zY2L2HSyA_YdPJZw/exec";
 
-// The catalog tab, by gid (the number after #gid= in the sheet URL).
-function catalogGid(): number | undefined {
-  const raw = process.env.CATALOG_SHEET_GID;
-  if (!raw || !raw.trim()) return undefined;
-  const n = Number(raw.trim());
-  return Number.isFinite(n) ? n : undefined;
-}
-
-// Optional: identify the catalog tab by name instead of gid.
-function catalogTab(): string | undefined {
-  const t = process.env.CATALOG_SHEET_TAB;
-  return t && t.trim() ? t.trim() : undefined;
+function catalogFeedUrl(): string {
+  const url = process.env.CATALOG_FEED_URL;
+  return url && url.trim() ? url.trim() : DEFAULT_CATALOG_FEED_URL;
 }
 
 type RawRow = Record<string, unknown>;
@@ -174,10 +166,17 @@ let cache: { items: CatalogItem[]; fetchedAt: number } | null = null;
 let inflight: Promise<CatalogItem[]> | null = null;
 
 async function fetchCatalog(): Promise<CatalogItem[]> {
-  const rows = await readSheetRows(catalogSheetId(), {
-    tab: catalogTab(),
-    gid: catalogGid(),
+  // We manage our own ~5-min cache below, so don't let Next cache this fetch.
+  const res = await fetch(catalogFeedUrl(), {
+    cache: "no-store",
+    redirect: "follow",
+    headers: { accept: "application/json" },
   });
+  if (!res.ok) {
+    throw new Error(`Catalog feed returned HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as { items?: unknown };
+  const rows = Array.isArray(data.items) ? data.items : [];
   return rows
     .map((r) => normalizeCatalogItem(r as RawRow))
     .filter((it) => it.drug || it.ndc || it.catalogId);

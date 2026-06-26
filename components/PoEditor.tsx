@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Spinner } from "@/components/Spinner";
 import { StatusBadge } from "@/components/StatusBadge";
 import { useToast } from "@/app/providers";
@@ -164,8 +164,15 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
 
   const markDirty = useCallback(() => setDirty(true), []);
 
+  // Guards the eager mount-load and any focus-triggered retry: one fetch at a
+  // time and no refetch once loaded. Crucially it prevents an auto-retry loop —
+  // a stable callback (empty deps) plus this ref keep the mount effect from
+  // re-firing every time `catalogLoading` toggles. A failed load resets the ref
+  // so the user can retry by focusing the catalog box (or reloading).
+  const catalogRequested = useRef(false);
   const loadCatalog = useCallback(async () => {
-    if (catalog || catalogLoading) return;
+    if (catalogRequested.current) return;
+    catalogRequested.current = true;
     setCatalogLoading(true);
     setCatalogError(null);
     try {
@@ -176,18 +183,20 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       };
       if (!res.ok) {
         setCatalogError(data.error || "Failed to load catalog.");
+        catalogRequested.current = false;
         return;
       }
       setCatalog(Array.isArray(data.items) ? data.items : []);
     } catch {
       setCatalogError("Network error while loading the catalog.");
+      catalogRequested.current = false;
     } finally {
       setCatalogLoading(false);
     }
-  }, [catalog, catalogLoading]);
+  }, []);
 
   // Eager-load the catalog so a condition change re-prices immediately, even
-  // before the catalog picker has been opened.
+  // before the catalog picker has been opened. Runs once (loadCatalog is stable).
   useEffect(() => {
     loadCatalog();
   }, [loadCatalog]);

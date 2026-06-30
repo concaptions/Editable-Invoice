@@ -211,6 +211,11 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [dirty, setDirty] = useState(false);
+  // The PO PDF saved to Drive on the last successful generate (link shown to
+  // Landon). Cleared on any edit so a stale link is never presented.
+  const [savedFile, setSavedFile] = useState<{ name: string; url: string } | null>(
+    null
+  );
 
   // Catalog is lifted here (rather than living inside CatalogPicker) so a
   // condition change can re-price any catalog-linked row live — including rows
@@ -297,7 +302,10 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
 
-  const markDirty = useCallback(() => setDirty(true), []);
+  const markDirty = useCallback(() => {
+    setDirty(true);
+    setSavedFile(null);
+  }, []);
 
   // Guards the eager mount-load and any focus-triggered retry: one fetch at a
   // time and no refetch once loaded. Crucially it prevents an auto-retry loop —
@@ -534,9 +542,12 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     }
   }
 
-  // Generate the PO PDF directly via the Railway service (proxied) and download.
+  // Render the PO PDF in-process and save it to the vendor's Drive folder. On
+  // success the server returns the saved file's view link, which we surface as a
+  // confirmation banner (no browser download).
   async function generatePO() {
     setGenerating(true);
+    setSavedFile(null);
     try {
       const payload = {
         documentType: "PO",
@@ -557,21 +568,19 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        fileName?: string;
+        webViewLink?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.ok || !data.webViewLink) {
         toast("error", data.error || "Could not generate the PO PDF.");
         return;
       }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `PO ${invoiceNumber || "draft"}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast("success", "PO PDF downloaded.");
+      const name = data.fileName || `PO ${invoiceNumber || "draft"}.pdf`;
+      setSavedFile({ name, url: data.webViewLink });
+      toast("success", `Saved to Drive · ${name}`);
     } catch {
       toast("error", "Network error while generating the PO.");
     } finally {
@@ -1095,6 +1104,28 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         </section>
       )}
 
+      {/* Drive save confirmation */}
+      {savedFile && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm text-emerald-800">
+            <CheckIcon />
+            <span>
+              Saved to the vendor’s Drive folder as{" "}
+              <span className="font-semibold">{savedFile.name}</span>.
+            </span>
+          </div>
+          <a
+            href={savedFile.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+          >
+            Open in Drive
+            <ExternalLinkIcon />
+          </a>
+        </div>
+      )}
+
       {/* Actions */}
       <section className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
         <button
@@ -1316,6 +1347,40 @@ function PaperclipIcon() {
       aria-hidden="true"
     >
       <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      className="h-4 w-4 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
     </svg>
   );
 }

@@ -16,6 +16,7 @@ import {
   type Condition,
   type InvoiceDetail,
   type LineItem,
+  type ProofFile,
   type SavePayload,
   type SearchResult,
 } from "./types";
@@ -39,6 +40,14 @@ const COLUMN_HEADERS = {
   lineItemsJson: "Line Items JSON",
   lineItemCount: "Line Item Count",
   dateTime: "DateTime",
+  // Vendor-supplied context surfaced read-only in the editor.
+  customerNote: "Customer Note",
+  fileLinks: "File Links",
+  fileNames: "File Names",
+  // Editor-managed columns (added to the sheet manually; matched by header).
+  cleaningFee: "Cleaning Fee",
+  returnedTotal: "Returned Total",
+  originalLineItemsJson: "Original Line Items JSON",
 } as const;
 
 type ColumnKey = keyof typeof COLUMN_HEADERS;
@@ -148,7 +157,50 @@ function parsePrices(value: unknown): CatalogPrices | undefined {
   return { MINT: pick(o.MINT), DING: pick(o.DING), DAMAGE: pick(o.DAMAGE) };
 }
 
-// Parses the `Line Items JSON` cell into normalized line items (amount derived).
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function asFlag(value: unknown): boolean {
+  if (value === true) return true;
+  const s = asString(value).trim().toLowerCase();
+  return s === "true" || s === "1" || s === "yes";
+}
+
+// THE single place that maps a raw line-item object — from the sheet JSON OR a
+// client save payload — to a normalized LineItem. Every key the form/editor
+// round-trips is preserved (customerNote, poNote, rejected, cleaningFee), so the
+// editor never drops vendor data. `amount` is always derived; a rejected line is
+// forced to rate 0 / amount 0; per-item cleaningFee stays 0 (it's invoice-level).
+function normalizeLineItem(o: Record<string, unknown>): LineItem {
+  const drug = asString(o.drug).trim();
+  const strength = asString(o.strength).trim();
+  const quantity = toNum(o.quantity as string | number);
+  const rejected = asFlag(o.rejected);
+  const rate = rejected ? 0 : toNum(o.rate as string | number);
+  const item: LineItem = {
+    item: asString(o.item).trim() || `${drug} ${strength}`.trim(),
+    drug,
+    strength,
+    expiry: asString(o.expiry).trim(),
+    condition: normalizeCondition(o.condition),
+    quantity,
+    rate,
+    amount: round2(quantity * rate),
+    customerNote: asString(o.customerNote),
+    poNote: asString(o.poNote),
+    rejected,
+    cleaningFee: 0,
+  };
+  if (asString(o.ndc)) item.ndc = asString(o.ndc);
+  if (asString(o.catalogId)) item.catalogId = asString(o.catalogId);
+  if (asString(o.category)) item.category = asString(o.category);
+  const prices = parsePrices(o.prices);
+  if (prices) item.prices = prices;
+  return item;
+}
+
+// Parses a `Line Items JSON` cell into normalized line items (amount derived).
 function parseLineItems(raw: string): LineItem[] {
   if (!raw || !raw.trim()) return [];
   let arr: unknown;
@@ -158,32 +210,23 @@ function parseLineItems(raw: string): LineItem[] {
     return [];
   }
   if (!Array.isArray(arr)) return [];
-  return arr.map((entry) => {
-    const o = (entry ?? {}) as Record<string, unknown>;
-    const drug = typeof o.drug === "string" ? o.drug : "";
-    const strength = typeof o.strength === "string" ? o.strength : "";
-    const quantity = toNum(o.quantity as string | number);
-    const rate = toNum(o.rate as string | number);
-    const item: LineItem = {
-      item:
-        typeof o.item === "string" && o.item.trim()
-          ? o.item
-          : `${drug} ${strength}`.trim(),
-      drug,
-      strength,
-      expiry: typeof o.expiry === "string" ? o.expiry : "",
-      condition: normalizeCondition(o.condition),
-      quantity,
-      rate,
-      amount: round2(quantity * rate),
-    };
-    if (typeof o.ndc === "string" && o.ndc) item.ndc = o.ndc;
-    if (typeof o.catalogId === "string" && o.catalogId) item.catalogId = o.catalogId;
-    if (typeof o.category === "string" && o.category) item.category = o.category;
-    const prices = parsePrices(o.prices);
-    if (prices) item.prices = prices;
-    return item;
-  });
+  return arr.map((entry) => normalizeLineItem((entry ?? {}) as Record<string, unknown>));
+}
+
+// Splits a multi-value cell (newline- or comma-separated) into trimmed parts.
+function splitCell(raw: string): string[] {
+  return raw
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Pairs the `File Names` / `File Links` cells into proof files. Links are the
+// source of truth; a name is matched by index, falling back to the link text.
+function parseProofFiles(names: string, links: string): ProofFile[] {
+  const urls = splitCell(links);
+  const labels = splitCell(names);
+  return urls.map((url, i) => ({ name: labels[i] || url, url }));
 }
 
 function lineItemsTotal(items: LineItem[]): number {
@@ -279,18 +322,39 @@ export async function searchSubmissions(query: string): Promise<SearchResult[]> 
   }
 
   // Vendors go by different names across invoice / messaging / our records, so
-  // match against every identifier we have, not just the vendor name.
+  // match against every identifier we have, not just the vendor name. Invoice
+  // Number is included so a vendor's LVDTS-#### finds the row from this box too.
   return collectResults(rows, col, (row) => {
     const haystack = [
       cell(row, col.contactId),
       cell(row, col.vendorName),
       cell(row, col.email),
       cell(row, col.telegram),
+      cell(row, col.invoiceNumber),
     ]
       .join(" ")
       .toLowerCase();
     return haystack.includes(q);
   });
+}
+
+// Resolves an exact Invoice Number (e.g. "LVDTS-1001") to its Submission ID so
+// the home page can jump straight into the editor. Case/space-insensitive.
+export async function resolveSubmissionIdByInvoiceNumber(
+  invoiceNumber: string
+): Promise<string | null> {
+  const want = invoiceNumber.trim().toLowerCase();
+  if (!want) return null;
+
+  const { rows, col } = await readGrid();
+  if (col.submissionId == null || col.invoiceNumber == null) return null;
+
+  const row = rows.find(
+    (r) => cell(r, col.invoiceNumber).trim().toLowerCase() === want
+  );
+  if (!row) return null;
+  const submissionId = cell(row, col.submissionId).trim();
+  return submissionId || null;
 }
 
 // Most-recent submissions for the home screen (no search query needed).
@@ -318,6 +382,7 @@ export async function getSubmission(
   if (!row) return null;
 
   const lineItems = parseLineItems(cell(row, col.lineItemsJson));
+  const originalLineItems = parseLineItems(cell(row, col.originalLineItemsJson));
   return {
     submissionId: cell(row, col.submissionId),
     contactId: cell(row, col.contactId),
@@ -331,13 +396,27 @@ export async function getSubmission(
     status: cell(row, col.status),
     total: lineItemsTotal(lineItems),
     lineItems,
+    customerNote: cell(row, col.customerNote),
+    proofFiles: parseProofFiles(
+      cell(row, col.fileNames),
+      cell(row, col.fileLinks)
+    ),
+    cleaningFee: toNum(cell(row, col.cleaningFee).replace(/[$,]/g, "")),
+    returnedTotal: toNum(cell(row, col.returnedTotal).replace(/[$,]/g, "")),
+    estimatedTotal: toNum(cell(row, col.estimatedTotal).replace(/[$,]/g, "")),
+    originalLineItems,
   };
 }
 
-// Writes the edited state back to the matched row. Touches ONLY these columns:
-// Line Items JSON, Line Item Count, Estimated Total, Invoice Number, Invoice Date.
-// Returns the recomputed total.
-export async function saveSubmission(payload: SavePayload): Promise<number> {
+// Writes the edited state back to the matched row (keyed by Submission ID).
+// Touches: Line Items JSON, Line Item Count, Invoice Number, Invoice Date,
+// Cleaning Fee, Returned Total, Status, and — once, on first save — Original
+// Line Items JSON. Deliberately NEVER touches Estimated Total (the vendor's
+// original total / diff baseline), Customer Note, or File Links. Returns the
+// subtotal and the Returned Total (subtotal − cleaning fee).
+export async function saveSubmission(
+  payload: SavePayload
+): Promise<{ subtotal: number; returnedTotal: number }> {
   const id = payload.submissionId.trim();
   if (!id) throw new Error("submissionId is required");
 
@@ -355,36 +434,23 @@ export async function saveSubmission(payload: SavePayload): Promise<number> {
   if (rowIndex === -1) {
     throw new Error(`No submission found for "${id}"`);
   }
+  const row = rows[rowIndex];
 
-  // Recompute amounts + item label, then total. Preserve optional extras.
+  // Normalize through the shared mapper so every key is preserved (customerNote,
+  // poNote, rejected, cleaningFee) and a rejected line is forced to rate/amount 0.
   const items: LineItem[] = (
     Array.isArray(payload.lineItems) ? payload.lineItems : []
-  ).map((raw) => {
-    const drug = typeof raw.drug === "string" ? raw.drug.trim() : "";
-    const strength = typeof raw.strength === "string" ? raw.strength.trim() : "";
-    const quantity = toNum(raw.quantity);
-    const rate = toNum(raw.rate);
-    const item: LineItem = {
-      item: `${drug} ${strength}`.trim(),
-      drug,
-      strength,
-      expiry: typeof raw.expiry === "string" ? raw.expiry.trim() : "",
-      condition: normalizeCondition(raw.condition),
-      quantity,
-      rate,
-      amount: round2(quantity * rate),
-    };
-    if (typeof raw.ndc === "string" && raw.ndc) item.ndc = raw.ndc;
-    if (typeof raw.catalogId === "string" && raw.catalogId)
-      item.catalogId = raw.catalogId;
-    if (typeof raw.category === "string" && raw.category)
-      item.category = raw.category;
-    const prices = parsePrices(raw.prices);
-    if (prices) item.prices = prices;
-    return item;
-  });
+  ).map((raw) => normalizeLineItem(raw as unknown as Record<string, unknown>));
 
-  const total = lineItemsTotal(items);
+  const subtotal = lineItemsTotal(items);
+  const cleaningFee = Math.max(0, round2(toNum(payload.cleaningFee)));
+  const returnedTotal = round2(subtotal - cleaningFee);
+
+  // Snapshot the vendor's original line items ONCE: on the first save, if the
+  // Original Line Items JSON cell is empty, copy the pre-edit Line Items JSON
+  // (what's in the sheet right now) into it as the permanent diff baseline.
+  const existingOriginal = cell(row, col.originalLineItemsJson).trim();
+  const preEditLineItemsJson = cell(row, col.lineItemsJson);
 
   // header is row 1, rows[0] is sheet row 2 => sheet row = rowIndex + 2.
   const sheetRow = rowIndex + 2;
@@ -393,10 +459,15 @@ export async function saveSubmission(payload: SavePayload): Promise<number> {
   const updates: { col: number | undefined; value: string | number }[] = [
     { col: col.lineItemsJson, value: JSON.stringify(items) },
     { col: col.lineItemCount, value: items.length },
-    { col: col.estimatedTotal, value: total },
     { col: col.invoiceNumber, value: payload.invoiceNumber ?? "" },
     { col: col.invoiceDate, value: payload.invoiceDate ?? "" },
+    { col: col.cleaningFee, value: cleaningFee },
+    { col: col.returnedTotal, value: returnedTotal },
+    { col: col.status, value: "PO Edited" },
   ];
+  if (col.originalLineItemsJson != null && !existingOriginal) {
+    updates.push({ col: col.originalLineItemsJson, value: preEditLineItemsJson });
+  }
 
   const data: sheets_v4.Schema$ValueRange[] = updates
     .filter((u): u is { col: number; value: string | number } => u.col != null)
@@ -411,7 +482,7 @@ export async function saveSubmission(payload: SavePayload): Promise<number> {
     requestBody: { valueInputOption: "RAW", data },
   });
 
-  return total;
+  return { subtotal, returnedTotal };
 }
 
 // --- Generic reader -------------------------------------------------------

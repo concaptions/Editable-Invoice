@@ -21,6 +21,11 @@ export default function SearchPage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  // Direct "open by invoice number" lookup (exact match, e.g. LVDTS-1001).
+  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const q = query.trim();
   const searching = q.length > 0;
@@ -101,6 +106,34 @@ export default function SearchPage() {
     router.push(`/po/${encodeURIComponent(submissionId)}`);
   }
 
+  // Resolve an exact Invoice Number to its Submission ID, then open it. The
+  // internal route key stays the Submission ID; this is just a convenience entry.
+  async function openByInvoiceNumber(e: React.FormEvent) {
+    e.preventDefault();
+    const num = invoiceNumber.trim();
+    if (!num || lookupLoading) return;
+    setLookupLoading(true);
+    setLookupError(null);
+    try {
+      const res = await fetch(
+        `/api/po/resolve?invoiceNumber=${encodeURIComponent(num)}`
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        submissionId?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.submissionId) {
+        setLookupError(data.error || `No submission found for ${num}.`);
+        return;
+      }
+      router.push(`/po/${encodeURIComponent(data.submissionId)}`);
+    } catch {
+      setLookupError("Network error. Please try again.");
+    } finally {
+      setLookupLoading(false);
+    }
+  }
+
   const loading = searching ? searchLoading : recentLoading;
   const error = searching ? searchError : recentError;
   const list = searching ? results : recent;
@@ -165,6 +198,40 @@ export default function SearchPage() {
           </div>
         )}
       </div>
+
+      <div className="mt-6 flex items-center gap-3">
+        <div className="h-px flex-1 bg-slate-200" />
+        <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
+          or open by invoice number
+        </span>
+        <div className="h-px flex-1 bg-slate-200" />
+      </div>
+
+      <form onSubmit={openByInvoiceNumber} className="mt-4">
+        <div className="flex items-stretch gap-2">
+          <input
+            type="text"
+            value={invoiceNumber}
+            onChange={(e) => {
+              setInvoiceNumber(e.target.value);
+              if (lookupError) setLookupError(null);
+            }}
+            placeholder="Invoice number, e.g. LVDTS-1001"
+            className="w-full max-w-xs rounded-md border border-slate-300 bg-white px-4 py-2.5 text-sm shadow-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
+          />
+          <button
+            type="submit"
+            disabled={!invoiceNumber.trim() || lookupLoading}
+            className="inline-flex shrink-0 items-center gap-2 rounded-md bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {lookupLoading && <Spinner className="h-4 w-4 text-white" />}
+            Open
+          </button>
+        </div>
+        {lookupError && (
+          <p className="mt-2 text-sm text-rose-700">{lookupError}</p>
+        )}
+      </form>
     </main>
   );
 }

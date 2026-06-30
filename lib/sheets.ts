@@ -446,7 +446,8 @@ export async function saveSubmission(
   ).map((raw) => normalizeLineItem(raw as unknown as Record<string, unknown>));
 
   const subtotal = lineItemsTotal(items);
-  const cleaningFee = Math.max(0, round2(toNum(payload.cleaningFee)));
+  // Cleaning fee is invoice-level with a hard $5 floor (never $0 / sub-$5).
+  const cleaningFee = Math.max(5, round2(toNum(payload.cleaningFee)));
   const returnedTotal = round2(subtotal - cleaningFee);
 
   // Snapshot the vendor's original line items ONCE: on the first save, if the

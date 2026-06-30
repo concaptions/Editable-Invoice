@@ -8,7 +8,7 @@ export const CONDITION_HELP = "Mint = 9m+, Ding = 6–8m, Damage = 3–5m";
 
 // Quick-fill reasons for a line's poNote. "Other" requires free text.
 export const REASON_PRESETS = [
-  "Sample - not purchased",
+  "Sample – not purchased",
   "Condition downgraded",
   "Repriced to current sheet",
   "Cleaning fee applied",

@@ -45,6 +45,8 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// Echoes the persisted cleaning fee, which carries a hard $5 floor (matches
+// saveSubmission — the fee is invoice-level and never $0 / sub-$5).
 function round2Fee(value: number): number {
-  return Math.max(0, Math.round((value + Number.EPSILON) * 100) / 100);
+  return Math.max(5, Math.round((value + Number.EPSILON) * 100) / 100);
 }

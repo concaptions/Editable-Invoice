@@ -26,6 +26,11 @@ import {
   type SaveResponse,
 } from "@/lib/types";
 
+// Cleaning fee is invoice-level: pre-filled to the $10 basis on a fresh PO and
+// hard-floored at $5 (never $0 / sub-$5) in the stepper and on manual entry.
+const DEFAULT_CLEANING_FEE = 10;
+const MIN_CLEANING_FEE = 5;
+
 // Editable row keeps quantity/rate as raw strings so the inputs allow free
 // typing (clearing, decimals); they're converted to numbers on save.
 interface EditableLineItem {
@@ -252,7 +257,12 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         setInvoiceNumber(d.invoiceNumber ?? "");
         setInvoiceDate(d.invoiceDate ?? "");
         setItems(toEditable(Array.isArray(d.lineItems) ? d.lineItems : []));
-        setCleaningFee(String(d.cleaningFee ?? 0));
+        // Fresh PO (no fee saved yet) pre-fills the $10 basis; a previously
+        // saved fee (always ≥ the $5 floor) loads as-is.
+        const loadedFee = round2(toNum(d.cleaningFee));
+        setCleaningFee(
+          String(loadedFee >= MIN_CLEANING_FEE ? loadedFee : DEFAULT_CLEANING_FEE)
+        );
         setStatus(d.status ?? "");
         setBaseline(
           Array.isArray(d.originalLineItems) && d.originalLineItems.length
@@ -279,7 +289,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     [items]
   );
   const cleaning = useMemo(
-    () => Math.max(0, round2(toNum(cleaningFee))),
+    () => Math.max(MIN_CLEANING_FEE, round2(toNum(cleaningFee))),
     [cleaningFee]
   );
   const returnedTotal = useMemo(
@@ -452,8 +462,17 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     setCleaningFee(value);
     markDirty();
   }
+  // Snap a manual entry up to the $5 floor when the field loses focus. Live
+  // totals already reflect the clamp via `cleaning`, so this only fixes display.
+  function commitCleaningFee() {
+    setCleaningFee((cur) =>
+      String(Math.max(MIN_CLEANING_FEE, round2(toNum(cur))))
+    );
+  }
   function bumpCleaningFee(delta: number) {
-    setCleaningFee((cur) => String(Math.max(0, round2(toNum(cur) + delta))));
+    setCleaningFee((cur) =>
+      String(Math.max(MIN_CLEANING_FEE, round2(toNum(cur) + delta)))
+    );
     markDirty();
   }
 
@@ -1005,6 +1024,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
               inputMode="decimal"
               value={cleaningFee}
               onChange={(e) => changeCleaningFee(e.target.value)}
+              onBlur={commitCleaningFee}
               className="w-32 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
             />
             <button

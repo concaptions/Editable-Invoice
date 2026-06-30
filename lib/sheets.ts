@@ -65,8 +65,7 @@ function sheetTab(): string {
 
 // Parses the full service-account key JSON from env and normalizes the private
 // key newlines (they are often stored as literal "\n" in deploy dashboards).
-// Exported so the Drive module can authenticate with the same credentials.
-export function getServiceAccount(): {
+function getServiceAccount(): {
   client_email: string;
   private_key: string;
 } {

@@ -551,6 +551,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     try {
       const payload = {
         documentType: "PO",
+        submissionId,
         invoiceNumber,
         invoiceDate,
         vendorName: detail?.vendorName ?? "",

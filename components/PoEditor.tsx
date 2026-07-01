@@ -235,6 +235,9 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   // none / not loaded → the review screen shows nothing extra. Never blocks the
   // page: it loads independently after the invoice and fails silently.
   const [proof, setProof] = useState<ProofFileData[] | null>(null);
+  // Whether the floating proof panel is expanded (true) or collapsed to a small
+  // pill (false). Reset to open each time a new vendor's proof loads.
+  const [proofOpen, setProofOpen] = useState(true);
 
   // Catalog is lifted here (rather than living inside CatalogPicker) so a
   // condition change can re-price any catalog-linked row live — including rows
@@ -324,6 +327,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         if (cancelled) return;
         if (data?.hasProof && Array.isArray(data.files) && data.files.length) {
           setProof(data.files);
+          setProofOpen(true);
         }
       } catch {
         // Fail quietly — treat as no proof.
@@ -733,44 +737,54 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         )}
       </div>
 
-      {/* Price-match proof (pulled from the vendor's Drive folder). Rendered ONLY
-          when proof actually exists; otherwise nothing here and the layout is
-          unchanged. */}
-      {proof && proof.length > 0 && (
-        <>
-          <div
+      {/* Price-match proof — a floating panel pinned to the top-right, shown ONLY
+          when proof exists. It overlays the margin (fixed position) so the review
+          layout underneath is unchanged, and it's non-modal so the PO stays fully
+          editable. Dismissible to a compact pill. */}
+      {proof && proof.length > 0 &&
+        (proofOpen ? (
+          <aside
             role="alert"
-            className="mt-4 flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 shadow-sm"
+            className="fixed right-4 top-20 z-40 w-[330px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-rose-200 bg-white shadow-2xl ring-1 ring-rose-500/10"
           >
-            <span className="mt-0.5 shrink-0 text-amber-600">
-              <WarningIcon />
-            </span>
-            <p className="text-sm font-semibold text-amber-900">
-              Price-match proof uploaded — review before approving.
-            </p>
-          </div>
-          <section className="mt-3 rounded-xl border border-amber-200 bg-white p-5 shadow-sm">
-            <h2 className="text-sm font-semibold text-slate-700">
-              Price-match proof
-            </h2>
-            <div className="mt-3 flex flex-wrap gap-4">
+            <div className="flex items-start gap-2.5 bg-gradient-to-r from-rose-600 to-red-600 px-4 py-3">
+              <span className="mt-0.5 shrink-0 text-white">
+                <WarningIcon />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-white">
+                  Price-match proof
+                </p>
+                <p className="text-xs text-rose-100">Review before approving.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProofOpen(false)}
+                title="Hide"
+                aria-label="Hide price-match proof"
+                className="-mr-1 -mt-0.5 shrink-0 rounded-md p-1 text-rose-100 transition hover:bg-white/15 hover:text-white"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+            <div className="max-h-[calc(100vh-9rem)] space-y-3 overflow-y-auto p-4">
               {proof.map((file, i) =>
                 file.mimeType.startsWith("image/") ? (
-                  <div key={`${file.name}-${i}`} className="min-w-0">
+                  <div key={`${file.name}-${i}`}>
                     <button
                       type="button"
                       onClick={() => openProofFile(file)}
                       title={`Open ${file.name} full size in a new tab`}
-                      className="block overflow-hidden rounded-lg border border-slate-200 transition hover:border-brand-400"
+                      className="block w-full overflow-hidden rounded-xl border border-slate-200 bg-slate-50 transition hover:border-rose-300"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={file.dataUri}
                         alt={file.name}
-                        className="max-h-[400px] w-auto max-w-full object-contain"
+                        className="max-h-56 w-full object-contain"
                       />
                     </button>
-                    <p className="mt-1 max-w-[400px] truncate text-xs text-slate-500">
+                    <p className="mt-1 truncate text-xs text-slate-500">
                       {file.name}
                     </p>
                   </div>
@@ -779,18 +793,37 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                     key={`${file.name}-${i}`}
                     type="button"
                     onClick={() => openProofFile(file)}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-brand-700 transition hover:border-brand-400 hover:bg-brand-50"
+                    className="flex w-full items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-rose-700 transition hover:border-rose-300 hover:bg-rose-50"
                   >
-                    <PaperclipIcon />
-                    View {file.name}
-                    <ExternalLinkIcon />
+                    <span className="shrink-0 text-rose-500">
+                      <PaperclipIcon />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-left">
+                      {file.name}
+                    </span>
+                    <span className="shrink-0 text-slate-400">
+                      <ExternalLinkIcon />
+                    </span>
                   </button>
                 )
               )}
             </div>
-          </section>
-        </>
-      )}
+          </aside>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setProofOpen(true)}
+            className="fixed right-4 top-20 z-40 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-rose-600 to-red-600 px-4 py-2 text-sm font-semibold text-white shadow-lg ring-1 ring-rose-500/20 transition hover:from-rose-500 hover:to-red-500"
+          >
+            <WarningIcon />
+            Price-match proof
+            {proof.length > 1 && (
+              <span className="rounded-full bg-white/25 px-1.5 text-xs font-semibold">
+                {proof.length}
+              </span>
+            )}
+          </button>
+        ))}
 
       {/* Header (read-only) */}
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -1551,6 +1584,24 @@ function WarningIcon() {
       <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
       <line x1="12" y1="9" x2="12" y2="13" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   );
 }

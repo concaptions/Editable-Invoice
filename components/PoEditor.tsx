@@ -193,6 +193,15 @@ function computeChanges(
   return out;
 }
 
+// A price-match proof file pulled from the vendor's Drive folder via the
+// get-proof webhook (through /api/proof). `dataUri` is a ready-to-render
+// data:<mime>;base64,... string.
+interface ProofFileData {
+  name: string;
+  mimeType: string;
+  dataUri: string;
+}
+
 export function PoEditor({ submissionId }: { submissionId: string }) {
   const router = useRouter();
   const toast = useToast();
@@ -221,6 +230,11 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const [savedFile, setSavedFile] = useState<{ name: string; url: string } | null>(
     null
   );
+
+  // Vendor's price-match proof (files pulled from Drive via /api/proof). Null =
+  // none / not loaded → the review screen shows nothing extra. Never blocks the
+  // page: it loads independently after the invoice and fails silently.
+  const [proof, setProof] = useState<ProofFileData[] | null>(null);
 
   // Catalog is lifted here (rather than living inside CatalogPicker) so a
   // condition change can re-price any catalog-linked row live — including rows
@@ -283,6 +297,42 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
       cancelled = true;
     };
   }, [submissionId]);
+
+  // Look up the vendor's price-match proof once the invoice (and thus its
+  // resolved contactId + vendorName) is known. Runs independently of the invoice
+  // load so it never blocks the page, and fails quietly: any error just leaves
+  // `proof` null and the review screen renders nothing extra.
+  useEffect(() => {
+    const contactId = detail?.contactId?.trim() ?? "";
+    const vendorName = detail?.vendorName?.trim() ?? "";
+    setProof(null);
+    if (!contactId || !vendorName) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/proof", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contactId, vendorName }),
+        });
+        if (!res.ok) return;
+        const data = (await res.json().catch(() => null)) as {
+          hasProof?: boolean;
+          files?: ProofFileData[];
+        } | null;
+        if (cancelled) return;
+        if (data?.hasProof && Array.isArray(data.files) && data.files.length) {
+          setProof(data.files);
+        }
+      } catch {
+        // Fail quietly — treat as no proof.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.contactId, detail?.vendorName]);
 
   const subtotal = useMemo(
     () => round2(items.reduce((sum, it) => sum + lineAmount(it), 0)),
@@ -486,6 +536,27 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
     router.push("/");
   }
 
+  // Open a proof file in a new tab. Browsers block top-frame navigation to a
+  // `data:` URL, so convert it to a Blob URL first (works for images and PDFs
+  // alike). Called from a click handler, so it's not popup-blocked.
+  function openProofFile(file: ProofFileData) {
+    try {
+      const comma = file.dataUri.indexOf(",");
+      const base64 = comma >= 0 ? file.dataUri.slice(comma + 1) : file.dataUri;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], {
+        type: file.mimeType || "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      window.open(file.dataUri, "_blank", "noopener,noreferrer");
+    }
+  }
+
   // Builds the normalized line items for save + PDF (rejected => rate/amount 0,
   // every key preserved for round-trip fidelity).
   function buildLineItems(): LineItem[] {
@@ -661,6 +732,65 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
           </span>
         )}
       </div>
+
+      {/* Price-match proof (pulled from the vendor's Drive folder). Rendered ONLY
+          when proof actually exists; otherwise nothing here and the layout is
+          unchanged. */}
+      {proof && proof.length > 0 && (
+        <>
+          <div
+            role="alert"
+            className="mt-4 flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 shadow-sm"
+          >
+            <span className="mt-0.5 shrink-0 text-amber-600">
+              <WarningIcon />
+            </span>
+            <p className="text-sm font-semibold text-amber-900">
+              Price-match proof uploaded — review before approving.
+            </p>
+          </div>
+          <section className="mt-3 rounded-xl border border-amber-200 bg-white p-5 shadow-sm">
+            <h2 className="text-sm font-semibold text-slate-700">
+              Price-match proof
+            </h2>
+            <div className="mt-3 flex flex-wrap gap-4">
+              {proof.map((file, i) =>
+                file.mimeType.startsWith("image/") ? (
+                  <div key={`${file.name}-${i}`} className="min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => openProofFile(file)}
+                      title={`Open ${file.name} full size in a new tab`}
+                      className="block overflow-hidden rounded-lg border border-slate-200 transition hover:border-brand-400"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={file.dataUri}
+                        alt={file.name}
+                        className="max-h-[400px] w-auto max-w-full object-contain"
+                      />
+                    </button>
+                    <p className="mt-1 max-w-[400px] truncate text-xs text-slate-500">
+                      {file.name}
+                    </p>
+                  </div>
+                ) : (
+                  <button
+                    key={`${file.name}-${i}`}
+                    type="button"
+                    onClick={() => openProofFile(file)}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-brand-700 transition hover:border-brand-400 hover:bg-brand-50"
+                  >
+                    <PaperclipIcon />
+                    View {file.name}
+                    <ExternalLinkIcon />
+                  </button>
+                )
+              )}
+            </div>
+          </section>
+        </>
+      )}
 
       {/* Header (read-only) */}
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -1402,6 +1532,25 @@ function ExternalLinkIcon() {
       aria-hidden="true"
     >
       <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    </svg>
+  );
+}
+
+function WarningIcon() {
+  return (
+    <svg
+      className="h-5 w-5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   );
 }

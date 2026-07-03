@@ -12,10 +12,13 @@ import { google, type sheets_v4 } from "googleapis";
 import { round2, toNum } from "./format";
 import {
   CONDITIONS,
+  emptyPayout,
   type CatalogPrices,
   type Condition,
   type InvoiceDetail,
   type LineItem,
+  type PaymentDueEntry,
+  type PayoutDetails,
   type ProofFile,
   type SavePayload,
   type SearchResult,
@@ -386,13 +389,17 @@ export async function getSubmission(
 
   const lineItems = parseLineItems(cell(row, col.lineItemsJson));
   const originalLineItems = parseLineItems(cell(row, col.originalLineItemsJson));
+  const paymentMethod = cell(row, col.paymentMethod);
+  // Payout details live on the Vendor master (keyed by Contact ID), not the
+  // submission row. Seed from there; the per-submission Payment Method wins.
+  const payout = await resolveVendorPayout(cell(row, col.contactId), paymentMethod);
   return {
     submissionId: cell(row, col.submissionId),
     contactId: cell(row, col.contactId),
     vendorName: cell(row, col.vendorName),
     email: cell(row, col.email),
     telegram: cell(row, col.telegram) || undefined,
-    paymentMethod: cell(row, col.paymentMethod),
+    paymentMethod,
     carrier: cell(row, col.carrier),
     invoiceNumber: cell(row, col.invoiceNumber),
     invoiceDate: cell(row, col.invoiceDate),
@@ -408,6 +415,7 @@ export async function getSubmission(
     returnedTotal: toNum(cell(row, col.returnedTotal).replace(/[$,]/g, "")),
     estimatedTotal: toNum(cell(row, col.estimatedTotal).replace(/[$,]/g, "")),
     originalLineItems,
+    payout,
   };
 }
 
@@ -487,6 +495,228 @@ export async function saveSubmission(
   });
 
   return { subtotal, returnedTotal };
+}
+
+// --- Payout details + payment-due list ------------------------------------
+// Payout instructions are NOT on the submission row — they live on the "Vendor"
+// tab (keyed by GHL Contact ID). The intake system captures them granularly, but
+// this sheet only persists a lossy projection: a single number in "ACH/Wire
+// Fields" and a joined address in "Bank Address Fields". We seed the structured
+// payout from those (plus any granular columns that may appear later, matched by
+// header) and let the editor fill the rest. Editing/persisting goes through the
+// external payout service (see /api/po/payout) — never written here.
+
+const VENDOR_TAB = "Vendor";
+const PAYMENT_DUE_TAB = "Payment Due";
+
+const PAYMENT_DUE_HEADERS = [
+  "DateTime",
+  "Submission ID",
+  "GHL Contact ID",
+  "Vendor Name",
+  "Invoice Number",
+  "Invoice Date",
+  "Payment Method",
+  "PO Amount",
+  "PO Doc Link",
+  "Status",
+] as const;
+
+// Case-insensitive, whitespace-tolerant getter over a { header: value } row.
+// Returns the first non-empty match among the candidate header names.
+function pickCI(row: Record<string, string>, names: string[]): string {
+  const lower = new Map<string, string>();
+  for (const [k, v] of Object.entries(row)) {
+    lower.set(normalizeHeader(k), v);
+  }
+  for (const n of names) {
+    const v = lower.get(normalizeHeader(n));
+    if (v != null && String(v).trim() !== "") return String(v).trim();
+  }
+  return "";
+}
+
+// Drops obviously-empty blob junk like "undefined undefined undefined".
+function cleanBlob(value: string): string {
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  if (/^(?:undefined|null|na|n\/a)(?:[\s,]+(?:undefined|null|na|n\/a))*$/i.test(s)) {
+    return "";
+  }
+  return s;
+}
+
+// Reads the Vendor tab as { header: value } rows. Never throws — a missing tab
+// or read error yields an empty list so payout seeding degrades to blank.
+async function readVendorRows(): Promise<Record<string, string>[]> {
+  try {
+    return await readSheetRows(sheetId(), { tab: VENDOR_TAB });
+  } catch {
+    return [];
+  }
+}
+
+// Builds structured payout from a Vendor row (may be undefined). `method` (from
+// the submission) takes precedence over the vendor's own Payment Method.
+function seedPayout(
+  vendorRow: Record<string, string> | undefined,
+  method: string
+): PayoutDetails {
+  const p = emptyPayout();
+  p.method = (method || (vendorRow ? pickCI(vendorRow, ["Payment Method"]) : "")).trim();
+  if (!vendorRow) return p;
+
+  // Granular columns — forward-compatible: populated once the payout service
+  // starts writing them back. Matched by header name.
+  p.achAccountHolder = pickCI(vendorRow, ["ACH Account Holder Name", "ACH Account Holder"]);
+  p.achRoutingNumber = pickCI(vendorRow, ["ACH Routing Number"]);
+  p.achAccountNumber = pickCI(vendorRow, ["ACH Account Number"]);
+  p.achAccountType = pickCI(vendorRow, ["ACH Account Type"]);
+  p.wireBankName = pickCI(vendorRow, ["Wire Bank Name", "Bank Name"]);
+  p.wireRoutingSwift = pickCI(vendorRow, [
+    "Wire Routing Number",
+    "Wire Routing/SWIFT",
+    "Wire SWIFT",
+    "SWIFT",
+  ]);
+  p.wireAccountNumber = pickCI(vendorRow, ["Wire Account Number"]);
+  p.wireBeneficiary = pickCI(vendorRow, [
+    "Wire Account Holder Name",
+    "Wire Beneficiary",
+    "Beneficiary",
+  ]);
+  p.bankAddress = cleanBlob(pickCI(vendorRow, ["Bank Address Fields", "Bank Address"]));
+
+  // Legacy lossy blob: a single number in "ACH/Wire Fields". Seed it into the
+  // routing field of whichever method applies, without clobbering a granular one.
+  const blob = cleanBlob(pickCI(vendorRow, ["ACH/Wire Fields"]));
+  if (blob) {
+    const m = p.method.toLowerCase();
+    const wireOnly = m.includes("wire") && !m.includes("ach") && !m.includes("both");
+    if (wireOnly) {
+      if (!p.wireRoutingSwift) p.wireRoutingSwift = blob;
+    } else if (!p.achRoutingNumber) {
+      p.achRoutingNumber = blob;
+    }
+  }
+  return p;
+}
+
+// Resolves one vendor's payout by Contact ID (reads the whole small Vendor tab).
+async function resolveVendorPayout(
+  contactId: string,
+  method: string
+): Promise<PayoutDetails> {
+  const id = (contactId ?? "").trim();
+  if (!id) return seedPayout(undefined, method);
+  const rows = await readVendorRows();
+  const match = rows.find((r) => pickCI(r, ["GHL Contact ID"]).trim() === id);
+  return seedPayout(match, method);
+}
+
+// Ensures a tab exists with the given header row; creates it (with the header)
+// on first use. Safe to call repeatedly.
+async function ensureTab(title: string, headers: readonly string[]): Promise<void> {
+  const sheets = getSheets();
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: sheetId(),
+    fields: "sheets(properties(title))",
+  });
+  const exists = (meta.data.sheets ?? []).some(
+    (s) => normalizeHeader(s.properties?.title ?? "") === normalizeHeader(title)
+  );
+  if (exists) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId(),
+    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId(),
+    range: `'${title}'!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: [headers as string[]] },
+  });
+}
+
+// Appends one "payment due" row when a PO is generated. Deliberately stores only
+// non-sensitive fields (method, amount, links, ids) — NOT account/routing
+// numbers, which the owner page resolves live from the vendor master.
+export async function appendPaymentDue(entry: {
+  submissionId: string;
+  contactId: string;
+  vendorName: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  method: string;
+  amount: number;
+  poLink: string;
+}): Promise<void> {
+  await ensureTab(PAYMENT_DUE_TAB, PAYMENT_DUE_HEADERS);
+  const sheets = getSheets();
+  const rowValues = [
+    new Date().toISOString(),
+    entry.submissionId,
+    entry.contactId,
+    entry.vendorName,
+    entry.invoiceNumber,
+    entry.invoiceDate,
+    entry.method,
+    round2(entry.amount),
+    entry.poLink,
+    "Payment Due",
+  ];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: sheetId(),
+    range: `'${PAYMENT_DUE_TAB}'!A1`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [rowValues] },
+  });
+}
+
+// Reads the payment-due list, newest-first, resolving each row's payout details
+// live from the vendor master (so account numbers live in exactly one place).
+export async function getPaymentDue(): Promise<PaymentDueEntry[]> {
+  let rows: Record<string, string>[];
+  try {
+    rows = await readSheetRows(sheetId(), { tab: PAYMENT_DUE_TAB });
+  } catch {
+    return []; // tab not created yet → empty list
+  }
+  if (!rows.length) return [];
+
+  const vendorRows = await readVendorRows();
+  const vendorByContact = new Map<string, Record<string, string>>();
+  for (const vr of vendorRows) {
+    const cid = pickCI(vr, ["GHL Contact ID"]).trim();
+    if (cid && !vendorByContact.has(cid)) vendorByContact.set(cid, vr);
+  }
+
+  const mapped = rows.map((r, order) => {
+    const contactId = pickCI(r, ["GHL Contact ID"]);
+    const method = pickCI(r, ["Payment Method"]);
+    const vendorRow = contactId ? vendorByContact.get(contactId) : undefined;
+    const dateTime = pickCI(r, ["DateTime"]);
+    const entry: PaymentDueEntry = {
+      dateTime,
+      submissionId: pickCI(r, ["Submission ID"]),
+      contactId,
+      vendorName: pickCI(r, ["Vendor Name"]),
+      invoiceNumber: pickCI(r, ["Invoice Number"]),
+      invoiceDate: pickCI(r, ["Invoice Date"]),
+      amount: toNum(pickCI(r, ["PO Amount"]).replace(/[$,]/g, "")),
+      poLink: pickCI(r, ["PO Doc Link"]),
+      status: pickCI(r, ["Status"]) || "Payment Due",
+      payout: seedPayout(vendorRow, method),
+    };
+    return { entry, dateTime, order };
+  });
+
+  mapped.sort((a, b) => {
+    const byDate = compareRecency(a.dateTime, b.dateTime);
+    return byDate !== 0 ? byDate : b.order - a.order;
+  });
+  return mapped.map((m) => m.entry);
 }
 
 // --- Generic reader -------------------------------------------------------

@@ -86,6 +86,102 @@ export interface ProofFile {
   url: string;
 }
 
+// How the vendor gets paid. Free text on the sheet ("ACH" / "Wire" / "Both"),
+// kept as a loose string so an unexpected value is never dropped.
+export type PaymentMethod = string;
+
+// The vendor's payout instructions, shown + edited on the review screen and
+// printed on the PO. The intake system captures these granularly, but the sheet
+// only persists a lossy projection, so every field is optional/blank and fully
+// editable — a missing field renders as an empty input, never blocks.
+export interface PayoutDetails {
+  method: PaymentMethod; // "ACH" | "Wire" | "Both" | other
+  // ACH
+  achAccountHolder: string;
+  achRoutingNumber: string;
+  achAccountNumber: string;
+  achAccountType: string; // e.g. "Checking" | "Savings"
+  // Wire
+  wireBankName: string;
+  wireRoutingSwift: string; // routing or SWIFT/BIC
+  wireAccountNumber: string;
+  wireBeneficiary: string;
+  // Shared bank mailing address (from the sheet's "Bank Address Fields").
+  bankAddress: string;
+}
+
+// The ordered payout field keys (excluding `method`) — used to build a blank
+// payout, detect "any detail present", and iterate in the UI/PDF.
+export const PAYOUT_DETAIL_KEYS = [
+  "achAccountHolder",
+  "achRoutingNumber",
+  "achAccountNumber",
+  "achAccountType",
+  "wireBankName",
+  "wireRoutingSwift",
+  "wireAccountNumber",
+  "wireBeneficiary",
+  "bankAddress",
+] as const;
+
+export function emptyPayout(): PayoutDetails {
+  return {
+    method: "",
+    achAccountHolder: "",
+    achRoutingNumber: "",
+    achAccountNumber: "",
+    achAccountType: "",
+    wireBankName: "",
+    wireRoutingSwift: "",
+    wireAccountNumber: "",
+    wireBeneficiary: "",
+    bankAddress: "",
+  };
+}
+
+// True when at least one detail field (beyond `method`) is filled.
+export function hasPayoutDetails(p: PayoutDetails | null | undefined): boolean {
+  if (!p) return false;
+  return PAYOUT_DETAIL_KEYS.some((k) => String(p[k] ?? "").trim() !== "");
+}
+
+// Payload sent to /api/po/payout (the single write path — proxied to the
+// external payout service, which is the source of truth and mirrors to GHL).
+export interface PayoutSavePayload {
+  submissionId: string;
+  contactId: string;
+  vendorId?: string;
+  payout: PayoutDetails;
+}
+
+export interface PayoutSaveResponse {
+  ok: boolean;
+  error?: string;
+  // True when the external payout endpoint isn't configured yet (placeholder
+  // env) — the UI keeps the typed values and shows a "not configured" notice.
+  notConfigured?: boolean;
+}
+
+// One row of the owner-only "payment due" working list. The sensitive account
+// numbers are NOT stored in the Payment Due tab; they're resolved live from the
+// vendor master for display, so the list stays in sync with a single source.
+export interface PaymentDueEntry {
+  dateTime: string;
+  submissionId: string;
+  contactId: string;
+  vendorName: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  amount: number; // the PO's Returned Total
+  poLink: string; // generated PO PDF (Drive view link)
+  status: string;
+  payout: PayoutDetails; // resolved from the vendor master for display
+}
+
+export interface PaymentDueResponse {
+  entries: PaymentDueEntry[];
+}
+
 // A single row returned by /api/po/search.
 export interface SearchResult {
   submissionId: string;
@@ -134,6 +230,10 @@ export interface InvoiceDetail {
   // captured once on the first save. Empty until then — fall back to the loaded
   // line items as the in-session diff baseline.
   originalLineItems: LineItem[];
+  // The vendor's payout instructions, pre-filled from the resolved vendor master
+  // (seeded from the Vendor tab). Always present (blank fields when unknown) so
+  // the editor never has to null-check.
+  payout: PayoutDetails;
 }
 
 // Payload sent to /api/po/save (full edited state for one submission).

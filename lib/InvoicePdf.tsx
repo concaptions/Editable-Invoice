@@ -14,6 +14,7 @@ import {
   StyleSheet,
 } from "@react-pdf/renderer";
 import { formatUSD } from "./format";
+import type { PayoutDetails } from "./types";
 
 export interface PdfLineItem {
   drug?: string;
@@ -43,6 +44,7 @@ export interface InvoicePdfData {
   subtotal?: number;
   cleaningFee?: number;
   total?: number;
+  payout?: PayoutDetails;
 }
 
 // Brand palette.
@@ -155,6 +157,34 @@ const styles = StyleSheet.create({
   grandLabel: { fontFamily: "Helvetica-Bold", fontSize: 11, color: DARK },
   grandValue: { fontFamily: "Helvetica-Bold", fontSize: 13, color: DARK },
 
+  // Payout details
+  payoutBox: {
+    marginTop: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  payoutTitle: {
+    fontSize: 7.5,
+    letterSpacing: 1,
+    color: BLUE,
+    fontFamily: "Helvetica-Bold",
+    marginBottom: 5,
+  },
+  payoutMethod: {
+    fontSize: 10,
+    fontFamily: "Helvetica-Bold",
+    color: DARK,
+    marginBottom: 5,
+  },
+  payoutGrid: { flexDirection: "row", flexWrap: "wrap" },
+  payoutItem: { width: "50%", paddingVertical: 2, paddingRight: 10 },
+  payoutLabel: { fontSize: 7, letterSpacing: 0.4, color: MUTED },
+  payoutValue: { fontSize: 9.5, color: "#1A2430" },
+  payoutEmpty: { fontSize: 9, color: MUTED },
+
   // Footer
   footer: {
     position: "absolute",
@@ -202,6 +232,34 @@ export function InvoicePdf({ data }: { data: InvoicePdfData }) {
 
   const items = Array.isArray(data.lineItems) ? data.lineItems : [];
   const contactLine = [data.email, data.phone].filter((x) => x && String(x).trim()).join("  ·  ");
+
+  // Payout block: show the method + any filled fields for the applicable
+  // method(s). A partial payout prints only what's on file (never blank rows).
+  const payout = data.payout;
+  const payoutMethod = (payout?.method ?? "").trim();
+  const payoutRows: { label: string; value: string }[] = [];
+  if (payout) {
+    const m = payoutMethod.toLowerCase();
+    const showAch = !m || m.includes("ach") || m.includes("both");
+    const showWire = !m || m.includes("wire") || m.includes("both");
+    const push = (label: string, v?: string) => {
+      if (v && String(v).trim()) payoutRows.push({ label, value: String(v).trim() });
+    };
+    if (showAch) {
+      push("ACH — Account Holder", payout.achAccountHolder);
+      push("ACH — Routing", payout.achRoutingNumber);
+      push("ACH — Account #", payout.achAccountNumber);
+      push("ACH — Account Type", payout.achAccountType);
+    }
+    if (showWire) {
+      push("Wire — Bank Name", payout.wireBankName);
+      push("Wire — Routing / SWIFT", payout.wireRoutingSwift);
+      push("Wire — Account #", payout.wireAccountNumber);
+      push("Wire — Beneficiary", payout.wireBeneficiary);
+    }
+    push("Bank Address", payout.bankAddress);
+  }
+  const showPayout = !!payout && (payoutMethod !== "" || payoutRows.length > 0);
 
   return (
     <Document
@@ -322,6 +380,30 @@ export function InvoicePdf({ data }: { data: InvoicePdfData }) {
             </View>
           </View>
         </View>
+
+        {/* Payout details */}
+        {showPayout ? (
+          <View style={styles.payoutBox} wrap={false}>
+            <Text style={styles.payoutTitle}>PAYOUT DETAILS</Text>
+            {payoutMethod ? (
+              <Text style={styles.payoutMethod}>Method: {payoutMethod}</Text>
+            ) : null}
+            {payoutRows.length > 0 ? (
+              <View style={styles.payoutGrid}>
+                {payoutRows.map((r, i) => (
+                  <View key={i} style={styles.payoutItem}>
+                    <Text style={styles.payoutLabel}>{r.label}</Text>
+                    <Text style={styles.payoutValue}>{r.value}</Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.payoutEmpty}>
+                No account details on file — add before paying.
+              </Text>
+            )}
+          </View>
+        ) : null}
 
         {/* Footer */}
         <View style={styles.footer} fixed>

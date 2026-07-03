@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { requireAuth } from "@/lib/auth-guard";
 import { InvoicePdf, type InvoicePdfData } from "@/lib/InvoicePdf";
-import { getSubmission } from "@/lib/sheets";
+import { appendPaymentDue, getSubmission } from "@/lib/sheets";
+import { toNum } from "@/lib/format";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,7 +82,16 @@ export async function POST(request: NextRequest) {
     // to renderToBuffer (DocumentProps is all-optional, so wrapping it in
     // createElement(InvoicePdf, …) would fail TypeScript's weak-type check).
     pdf = await renderToBuffer(
-      InvoicePdf({ data: { ...body, contactId, vendorName, email } })
+      InvoicePdf({
+        data: {
+          ...body,
+          contactId,
+          vendorName,
+          email,
+          // Print what Landon sees; fall back to the resolved vendor payout.
+          payout: body.payout ?? submission.payout,
+        },
+      })
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : "PDF render failed";
@@ -130,6 +140,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { ok: false, error: `PDF rendered but Drive save failed: ${message}` },
       { status: 502 }
+    );
+  }
+
+  // Generating a PO = the moment a payment becomes due. Log a payment-due entry
+  // Landon can work from without opening a sheet. Best-effort: a failure here
+  // must NOT fail the PO (it's already filed), and we never log bank details.
+  try {
+    await appendPaymentDue({
+      submissionId,
+      contactId,
+      vendorName,
+      invoiceNumber: body.invoiceNumber?.trim() || "",
+      invoiceDate: body.invoiceDate?.trim() || "",
+      method: (submission.payout?.method || submission.paymentMethod || "").trim(),
+      amount: toNum(body.total),
+      poLink: data.webViewLink || "",
+    });
+  } catch (e) {
+    console.error(
+      "payment-due append failed:",
+      e instanceof Error ? e.message : "unknown error"
     );
   }
 

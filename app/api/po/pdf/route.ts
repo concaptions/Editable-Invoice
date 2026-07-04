@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { requireAuth } from "@/lib/auth-guard";
 import { InvoicePdf, type InvoicePdfData } from "@/lib/InvoicePdf";
-import { appendPaymentDue, getSubmission } from "@/lib/sheets";
+import { appendPaymentDue, appendPORecord, getSubmission } from "@/lib/sheets";
 import { toNum } from "@/lib/format";
 
 export const runtime = "nodejs";
@@ -88,6 +88,8 @@ export async function POST(request: NextRequest) {
           contactId,
           vendorName,
           email,
+          // Carrier tracking number(s) — from the client if sent, else the sheet.
+          trackingNumbers: body.trackingNumbers ?? submission.trackingNumbers ?? [],
           // Print what Landon sees; fall back to the resolved vendor payout.
           payout: body.payout ?? submission.payout,
         },
@@ -164,9 +166,29 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Log a chronological PO History entry (browse/re-download every PO). Same
+  // best-effort contract: never fail the PO if this write hiccups.
+  try {
+    await appendPORecord({
+      poNumber: body.invoiceNumber?.trim() || "",
+      vendorName,
+      amount: toNum(body.total),
+      driveLink: data.webViewLink || "",
+      submissionId,
+    });
+  } catch (e) {
+    console.error(
+      "po-history append failed:",
+      e instanceof Error ? e.message : "unknown error"
+    );
+  }
+
   return NextResponse.json({
     ok: true,
     fileName: data.fileName,
     webViewLink: data.webViewLink,
+    // The rendered bytes, so the editor can offer a direct download alongside
+    // the Drive link (no second round-trip). Drive link stays authoritative.
+    pdfBase64: pdf.toString("base64"),
   });
 }

@@ -44,6 +44,7 @@ export interface InvoicePdfData {
   subtotal?: number;
   cleaningFee?: number;
   total?: number;
+  trackingNumbers?: string[];
   payout?: PayoutDetails;
 }
 
@@ -185,6 +186,24 @@ const styles = StyleSheet.create({
   payoutValue: { fontSize: 9.5, color: "#1A2430" },
   payoutEmpty: { fontSize: 9, color: MUTED },
 
+  // Tracking box — same framing as the payout box, listed above it.
+  trackingBox: {
+    marginTop: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  trackingTitle: {
+    fontSize: 7.5,
+    letterSpacing: 1,
+    color: BLUE,
+    fontFamily: "Helvetica-Bold",
+    marginBottom: 5,
+  },
+  trackingValue: { fontSize: 9.5, color: "#1A2430", paddingVertical: 1 },
+
   // Footer
   footer: {
     position: "absolute",
@@ -260,6 +279,15 @@ export function InvoicePdf({ data }: { data: InvoicePdfData }) {
     push("Bank Address", payout.bankAddress);
   }
   const showPayout = !!payout && (payoutMethod !== "" || payoutRows.length > 0);
+
+  // Carrier tracking number(s). Printed above the payout block; skipped entirely
+  // when none are present so no empty box shows.
+  const trackingNumbers = (
+    Array.isArray(data.trackingNumbers) ? data.trackingNumbers : []
+  )
+    .map((t) => String(t ?? "").trim())
+    .filter((t) => t !== "");
+  const showTracking = trackingNumbers.length > 0;
 
   return (
     <Document
@@ -380,6 +408,18 @@ export function InvoicePdf({ data }: { data: InvoicePdfData }) {
             </View>
           </View>
         </View>
+
+        {/* Tracking numbers (above the payout block; omitted when none) */}
+        {showTracking ? (
+          <View style={styles.trackingBox} wrap={false}>
+            <Text style={styles.trackingTitle}>TRACKING</Text>
+            {trackingNumbers.map((t, i) => (
+              <Text key={i} style={styles.trackingValue}>
+                {t}
+              </Text>
+            ))}
+          </View>
+        ) : null}
 
         {/* Payout details */}
         {showPayout ? (

@@ -69,6 +69,22 @@ function normalizeCondition(value: unknown): Condition {
     : "MINT";
 }
 
+// The submission's DateTime is an ISO timestamp; the Invoice Date
+// <input type="date"> needs a YYYY-MM-DD value (a US-locale browser then
+// DISPLAYS it as MM/DD/YYYY). Takes the leading date part verbatim to avoid any
+// timezone shifting; returns "" when the timestamp is missing/unparseable.
+function toDateInputValue(iso: string): string {
+  const s = (iso ?? "").trim();
+  if (!s) return "";
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "";
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 function toEditable(items: LineItem[]): EditableLineItem[] {
   return items.map((it) => ({
     id: newRowId(),
@@ -237,9 +253,12 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const [dirty, setDirty] = useState(false);
   // The PO PDF saved to Drive on the last successful generate (link shown to
   // Landon). Cleared on any edit so a stale link is never presented.
-  const [savedFile, setSavedFile] = useState<{ name: string; url: string } | null>(
-    null
-  );
+  const [savedFile, setSavedFile] = useState<{
+    name: string;
+    url: string;
+    // Rendered PDF bytes (base64) for a direct download, if the API returned it.
+    pdfBase64?: string;
+  } | null>(null);
 
   // Vendor's price-match proof (files pulled from Drive via /api/proof). Null =
   // none / not loaded → the review screen shows nothing extra. Never blocks the
@@ -282,7 +301,11 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         const d = data as InvoiceDetail;
         setDetail(d);
         setInvoiceNumber(d.invoiceNumber ?? "");
-        setInvoiceDate(d.invoiceDate ?? "");
+        // Pre-fill a blank Invoice Date with the original submission date so the
+        // PO is never dated blank; a previously set date loads as-is. Editable.
+        setInvoiceDate(
+          (d.invoiceDate ?? "").trim() || toDateInputValue(d.submittedAt ?? "")
+        );
         setItems(toEditable(Array.isArray(d.lineItems) ? d.lineItems : []));
         // Fresh PO (no fee saved yet) pre-fills the $10 basis; a previously
         // saved fee (always ≥ the $5 floor) loads as-is.
@@ -492,6 +515,32 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   }
   function addItem() {
     setItems((cur) => [...cur, blankRow()]);
+    markDirty();
+  }
+
+  // Reorder a line up (-1) or down (+1). No-op at the ends.
+  function moveItem(id: string, dir: -1 | 1) {
+    setItems((cur) => {
+      const i = cur.findIndex((it) => it.id === id);
+      if (i === -1) return cur;
+      const j = i + dir;
+      if (j < 0 || j >= cur.length) return cur;
+      const next = cur.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+    markDirty();
+  }
+
+  // Clone a line (fresh row id) and insert it directly below the original.
+  function duplicateItem(id: string) {
+    setItems((cur) => {
+      const i = cur.findIndex((it) => it.id === id);
+      if (i === -1) return cur;
+      const next = cur.slice();
+      next.splice(i + 1, 0, { ...cur[i], id: newRowId() });
+      return next;
+    });
     markDirty();
   }
 
@@ -713,6 +762,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         subtotal,
         cleaningFee: cleaning,
         total: returnedTotal,
+        trackingNumbers,
         payout,
       };
       const res = await fetch("/api/po/pdf", {
@@ -724,6 +774,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         ok?: boolean;
         fileName?: string;
         webViewLink?: string;
+        pdfBase64?: string;
         error?: string;
       };
       if (!res.ok || !data.ok || !data.webViewLink) {
@@ -731,12 +782,34 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
         return;
       }
       const name = data.fileName || `PO ${invoiceNumber || "draft"}.pdf`;
-      setSavedFile({ name, url: data.webViewLink });
+      setSavedFile({ name, url: data.webViewLink, pdfBase64: data.pdfBase64 });
       toast("success", `Saved to Drive · ${name}`);
     } catch {
       toast("error", "Network error while generating the PO.");
     } finally {
       setGenerating(false);
+    }
+  }
+
+  // Save the already-rendered PDF (base64 from generatePO) straight to disk —
+  // decode to bytes, wrap in a Blob, and click a throwaway object-URL anchor.
+  function downloadPdf() {
+    if (!savedFile?.pdfBase64) return;
+    try {
+      const bytes = Uint8Array.from(atob(savedFile.pdfBase64), (c) =>
+        c.charCodeAt(0)
+      );
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = savedFile.name || "purchase-order.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast("error", "Could not prepare the PDF for download.");
     }
   }
 
@@ -775,6 +848,9 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
   const totalDelta = round2(returnedTotal - estimatedTotal);
   const proofFiles = detail?.proofFiles ?? [];
   const customerNote = detail?.customerNote?.trim() || "";
+  // Carrier tracking number(s) from the sheet — read-only, shown in the meta
+  // grid and printed on the PO. Empty array renders nothing.
+  const trackingNumbers = detail?.trackingNumbers ?? [];
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8">
@@ -895,6 +971,12 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
           <ReadOnlyField label="Email" value={detail?.email} />
           <ReadOnlyField label="Payment method" value={detail?.paymentMethod} />
           <ReadOnlyField label="Carrier" value={detail?.carrier} />
+          {trackingNumbers.length > 0 ? (
+            <ReadOnlyField
+              label="Tracking numbers"
+              value={trackingNumbers.join(", ")}
+            />
+          ) : null}
           {detail?.telegram ? (
             <ReadOnlyField label="Telegram" value={detail.telegram} />
           ) : null}
@@ -1049,7 +1131,7 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                   </td>
                 </tr>
               ) : (
-                items.map((it) => {
+                items.map((it, index) => {
                   const sample = isSampleLine(it);
                   return (
                     <Fragment key={it.id}>
@@ -1147,15 +1229,46 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
                           )}
                         </td>
                         <td className="px-3 py-2 text-right align-top">
-                          <button
-                            type="button"
-                            onClick={() => removeItem(it.id)}
-                            aria-label="Remove line item"
-                            title="Remove line item"
-                            className="rounded p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
-                          >
-                            <TrashIcon />
-                          </button>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => moveItem(it.id, -1)}
+                              disabled={index === 0}
+                              aria-label="Move line up"
+                              title="Move up"
+                              className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                            >
+                              <ChevronUpIcon />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveItem(it.id, 1)}
+                              disabled={index === items.length - 1}
+                              aria-label="Move line down"
+                              title="Move down"
+                              className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+                            >
+                              <ChevronDownIcon />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => duplicateItem(it.id)}
+                              aria-label="Duplicate line item"
+                              title="Duplicate line item"
+                              className="rounded p-1 text-slate-400 transition hover:bg-brand-50 hover:text-brand-600"
+                            >
+                              <DuplicateIcon />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeItem(it.id)}
+                              aria-label="Remove line item"
+                              title="Remove line item"
+                              className="rounded p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
                         </td>
                       </tr>
 
@@ -1364,15 +1477,27 @@ export function PoEditor({ submissionId }: { submissionId: string }) {
               <span className="font-semibold">{savedFile.name}</span>.
             </span>
           </div>
-          <a
-            href={savedFile.url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
-          >
-            Open in Drive
-            <ExternalLinkIcon />
-          </a>
+          <div className="flex shrink-0 items-center gap-2">
+            {savedFile.pdfBase64 ? (
+              <button
+                type="button"
+                onClick={downloadPdf}
+                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+              >
+                Download PDF
+                <DownloadIcon />
+              </button>
+            ) : null}
+            <a
+              href={savedFile.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+            >
+              Open in Drive
+              <ExternalLinkIcon />
+            </a>
+          </div>
         </div>
       )}
 
@@ -1771,6 +1896,75 @@ function TrashIcon() {
       aria-hidden="true"
     >
       <path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+function ChevronUpIcon() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m18 15-6-6-6 6" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+    </svg>
+  );
+}
+
+function DuplicateIcon() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </svg>
   );
 }

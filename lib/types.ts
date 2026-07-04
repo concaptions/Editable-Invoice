@@ -182,6 +182,23 @@ export interface PaymentDueResponse {
   entries: PaymentDueEntry[];
 }
 
+// One row of the chronological "PO History" log — appended every time a PO PDF
+// is generated, so there's a single newest-first list of every PO produced.
+// Kept intentionally small (no bank details); the Drive link + submission id let
+// the UI re-open or re-download the PO.
+export interface POHistoryRecord {
+  poNumber: string;
+  vendorName: string;
+  date: string; // ISO timestamp of when the PO was generated
+  amount: number; // the PO's Returned Total
+  driveLink: string; // generated PO PDF (Drive view link)
+  submissionId: string;
+}
+
+export interface POHistoryResponse {
+  records: POHistoryRecord[];
+}
+
 // A single row returned by /api/po/search.
 export interface SearchResult {
   submissionId: string;
@@ -211,6 +228,13 @@ export interface InvoiceDetail {
   carrier: string;
   invoiceNumber: string;
   invoiceDate: string;
+  // The original submission timestamp (sheet "DateTime", ISO). Used only to
+  // pre-fill a blank Invoice Date. Added field — never replaces invoiceDate.
+  submittedAt: string;
+  // Carrier tracking number(s) parsed from the sheet's "Tracking Number" cell
+  // (one cell may hold several, comma/newline-separated). Read-only in the
+  // editor; printed on the PO. Empty array when none.
+  trackingNumbers: string[];
   status: string;
   // Current subtotal of the stored line items.
   total: number;

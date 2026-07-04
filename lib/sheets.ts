@@ -19,6 +19,7 @@ import {
   type LineItem,
   type PaymentDueEntry,
   type PayoutDetails,
+  type POHistoryRecord,
   type ProofFile,
   type SavePayload,
   type SearchResult,
@@ -36,6 +37,7 @@ const COLUMN_HEADERS = {
   telegram: "Telegram",
   paymentMethod: "Payment Method",
   carrier: "Carrier",
+  trackingNumber: "Tracking Number",
   status: "Status",
   invoiceNumber: "Invoice Number",
   invoiceDate: "Invoice Date",
@@ -403,6 +405,9 @@ export async function getSubmission(
     carrier: cell(row, col.carrier),
     invoiceNumber: cell(row, col.invoiceNumber),
     invoiceDate: cell(row, col.invoiceDate),
+    submittedAt: cell(row, col.dateTime),
+    // Carrier tracking number(s) — one sheet cell holding a comma/newline list.
+    trackingNumbers: splitCell(cell(row, col.trackingNumber)),
     status: cell(row, col.status),
     total: lineItemsTotal(lineItems),
     lineItems,
@@ -717,6 +722,80 @@ export async function getPaymentDue(): Promise<PaymentDueEntry[]> {
     return byDate !== 0 ? byDate : b.order - a.order;
   });
   return mapped.map((m) => m.entry);
+}
+
+// --- PO history log -------------------------------------------------------
+// A flat, chronological record of every PO PDF generated, so there's one place
+// to browse/re-download every PO produced. Appended best-effort from the pdf
+// route; a failure here never blocks the PO (which is already filed to Drive).
+
+const PO_HISTORY_TAB = "PO History";
+
+const PO_HISTORY_HEADERS = [
+  "PO Number",
+  "Vendor Name",
+  "Date",
+  "Amount",
+  "Drive Link",
+  "Submission ID",
+] as const;
+
+// Appends one PO History row. Creates the tab (with headers) on first use.
+export async function appendPORecord(record: {
+  poNumber: string;
+  vendorName: string;
+  amount: number;
+  driveLink: string;
+  submissionId: string;
+}): Promise<void> {
+  await ensureTab(PO_HISTORY_TAB, PO_HISTORY_HEADERS);
+  const sheets = getSheets();
+  const rowValues = [
+    record.poNumber,
+    record.vendorName,
+    new Date().toISOString(),
+    round2(record.amount),
+    record.driveLink,
+    record.submissionId,
+  ];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: sheetId(),
+    range: `'${PO_HISTORY_TAB}'!A1`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [rowValues] },
+  });
+}
+
+// Reads the PO history, newest-first. Never throws — a missing tab (no PO ever
+// generated) yields an empty list.
+export async function getPOHistory(): Promise<POHistoryRecord[]> {
+  let rows: Record<string, string>[];
+  try {
+    rows = await readSheetRows(sheetId(), { tab: PO_HISTORY_TAB });
+  } catch {
+    return []; // tab not created yet → empty list
+  }
+  if (!rows.length) return [];
+
+  const mapped = rows.map((r, order) => {
+    const date = pickCI(r, ["Date"]);
+    const record: POHistoryRecord = {
+      poNumber: pickCI(r, ["PO Number"]),
+      vendorName: pickCI(r, ["Vendor Name"]),
+      date,
+      amount: toNum(pickCI(r, ["Amount"]).replace(/[$,]/g, "")),
+      driveLink: pickCI(r, ["Drive Link"]),
+      submissionId: pickCI(r, ["Submission ID"]),
+    };
+    return { record, date, order };
+  });
+
+  mapped.sort((a, b) => {
+    const byDate = compareRecency(a.date, b.date);
+    return byDate !== 0 ? byDate : b.order - a.order;
+  });
+  return mapped.map((m) => m.record);
 }
 
 // --- Generic reader -------------------------------------------------------

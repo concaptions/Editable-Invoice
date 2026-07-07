@@ -35,6 +35,68 @@ function normalizePayout(raw: unknown): PayoutDetails {
   return out;
 }
 
+// The external service expects the payout grouped into ach / wire / bankAddress
+// objects. Our internal model is a flat, lossy projection, so we expand it here:
+//  - wire routing vs SWIFT: our UI stores one "Routing / SWIFT" field. A US
+//    routing number is digits-only; a SWIFT/BIC always contains letters. Route
+//    the single value by that shape (unknown/blank → routingNumber).
+//  - ach.bankName: the model captures a single bank name (under Wire); reuse it
+//    so an ACH-only payout still carries the bank name when one was entered.
+//  - bankAddress: the UI keeps this as one free-text field, so send the full
+//    text as `street` (city/state/zip blank). Lossless, and round-trips cleanly
+//    because the vendor master reads the address back as a single blob.
+interface UpstreamPayout {
+  method: string;
+  ach: {
+    accountHolder: string;
+    routingNumber: string;
+    accountNumber: string;
+    accountType: string;
+    bankName: string;
+  };
+  wire: {
+    beneficiary: string;
+    bankName: string;
+    routingNumber: string;
+    swift: string;
+    accountNumber: string;
+  };
+  bankAddress: { street: string; city: string; state: string; zip: string };
+}
+
+function splitRoutingSwift(value: string): {
+  routingNumber: string;
+  swift: string;
+} {
+  const v = value.trim();
+  if (!v) return { routingNumber: "", swift: "" };
+  return /[A-Za-z]/.test(v)
+    ? { routingNumber: "", swift: v }
+    : { routingNumber: v, swift: "" };
+}
+
+function toUpstreamPayout(p: PayoutDetails): UpstreamPayout {
+  const { routingNumber, swift } = splitRoutingSwift(p.wireRoutingSwift);
+  return {
+    method: p.method,
+    ach: {
+      accountHolder: p.achAccountHolder,
+      routingNumber: p.achRoutingNumber,
+      accountNumber: p.achAccountNumber,
+      accountType: p.achAccountType,
+      bankName: p.wireBankName,
+    },
+    wire: {
+      beneficiary: p.wireBeneficiary,
+      bankName: p.wireBankName,
+      routingNumber,
+      swift,
+      accountNumber: p.wireAccountNumber,
+    },
+    bankAddress: { street: p.bankAddress, city: "", state: "", zip: "" },
+  };
+}
+
 export async function POST(request: NextRequest) {
   const unauthorized = await requireAuth(request);
   if (unauthorized) return unauthorized;
@@ -65,12 +127,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const upstreamBody = { submissionId, contactId, vendorId, payout };
+  const upstreamBody = {
+    vendorId,
+    contactId,
+    submissionId,
+    payout: toUpstreamPayout(payout),
+  };
 
   let upstream: Response;
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (PAYOUT_API_SECRET) headers.Authorization = `Bearer ${PAYOUT_API_SECRET}`;
+    // The payout service authenticates via this exact header name.
+    if (PAYOUT_API_SECRET) headers["x-payout-secret"] = PAYOUT_API_SECRET;
     upstream = await fetch(PAYOUT_API_URL, {
       method: "POST",
       headers,
@@ -84,13 +152,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!upstream.ok) {
-    // Read a short, non-sensitive error hint if the service provides one.
-    const detail = (await upstream
-      .json()
-      .catch(() => null)) as { error?: string } | null;
+  // Success is HTTP 2xx and — when the service returns a body — not an explicit
+  // { ok: false }. The live endpoint returns { ok: true } on a successful save.
+  // Any error hint read here is non-sensitive (never the payload).
+  const result = (await upstream
+    .json()
+    .catch(() => null)) as { ok?: boolean; error?: string } | null;
+  if (!upstream.ok || (result && result.ok === false)) {
     const message =
-      (detail && typeof detail.error === "string" && detail.error) ||
+      (result && typeof result.error === "string" && result.error) ||
       `Payout service returned HTTP ${upstream.status}`;
     return NextResponse.json({ ok: false, error: message }, { status: 502 });
   }

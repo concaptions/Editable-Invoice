@@ -55,6 +55,16 @@ export function Header() {
           >
             PO history
           </Link>
+          <Link
+            href="/customer-payouts"
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              pathname === "/customer-payouts"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+            }`}
+          >
+            Customer payouts
+          </Link>
           <button
             type="button"
             onClick={logout}

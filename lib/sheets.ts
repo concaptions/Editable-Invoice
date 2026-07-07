@@ -23,6 +23,7 @@ import {
   type ProofFile,
   type SavePayload,
   type SearchResult,
+  type VendorPayoutMatch,
 } from "./types";
 
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
@@ -526,6 +527,10 @@ const PAYMENT_DUE_HEADERS = [
   "PO Amount",
   "PO Doc Link",
   "Status",
+  // Landon wants links to BOTH the PO and the invoice. Appended LAST (never
+  // inserted) so existing rows/columns stay aligned; ensureTab reconciles the
+  // header onto tabs created before this column existed.
+  "Invoice Link",
 ] as const;
 
 // Case-insensitive, whitespace-tolerant getter over a { header: value } row.
@@ -687,8 +692,49 @@ async function resolveVendorPayout(
   return seedPayout(match, method);
 }
 
+// Searches the Vendor tab for the owner's /customer-payouts tool. Matches a free
+// query against email / GHL Contact ID / name / business name (case-insensitive
+// substring) and returns each hit with its payout seeded (so the card opens
+// pre-filled). Only rows WITH a GHL Contact ID are returned — that id is the key
+// the payout service writes/reads by, so a row without one can't be saved.
+export async function searchVendorPayouts(
+  query: string
+): Promise<VendorPayoutMatch[]> {
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return [];
+  const rows = await readVendorRows();
+  const matches: VendorPayoutMatch[] = [];
+  for (const r of rows) {
+    const contactId = pickCI(r, ["GHL Contact ID"]);
+    if (!contactId) continue; // no key to save payout against → skip
+    const email = pickCI(r, ["Email"]);
+    const name = [pickCI(r, ["First Name"]), pickCI(r, ["Last Name"])]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    const businessName = pickCI(r, ["Business Name"]);
+    const method = pickCI(r, ["Payment Method"]);
+    const haystack = [contactId, email, name, businessName]
+      .join(" ")
+      .toLowerCase();
+    if (!haystack.includes(q)) continue;
+    matches.push({
+      contactId,
+      name,
+      businessName,
+      email,
+      method,
+      payout: seedPayout(r, method),
+    });
+    if (matches.length >= 25) break; // small cap — this is a lookup, not a list
+  }
+  return matches;
+}
+
 // Ensures a tab exists with the given header row; creates it (with the header)
-// on first use. Safe to call repeatedly.
+// on first use. When the tab already exists, reconciles the header row by
+// appending any MISSING headers to the right — existing columns are never
+// reordered or overwritten, so old rows stay readable. Safe to call repeatedly.
 async function ensureTab(title: string, headers: readonly string[]): Promise<void> {
   const sheets = getSheets();
   const meta = await sheets.spreadsheets.get({
@@ -698,16 +744,37 @@ async function ensureTab(title: string, headers: readonly string[]): Promise<voi
   const exists = (meta.data.sheets ?? []).some(
     (s) => normalizeHeader(s.properties?.title ?? "") === normalizeHeader(title)
   );
-  if (exists) return;
-  await sheets.spreadsheets.batchUpdate({
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: sheetId(),
+      requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId(),
+      range: `'${title}'!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [headers as string[]] },
+    });
+    return;
+  }
+
+  // Tab exists — append any headers it doesn't already have (e.g. a newly added
+  // "Invoice Link") at the first empty column, leaving A..last untouched.
+  const res = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId(),
-    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+    range: `'${title}'!1:1`,
   });
+  const current = ((res.data.values?.[0] as string[] | undefined) ?? []).map((h) =>
+    String(h ?? "")
+  );
+  const have = new Set(current.map(normalizeHeader));
+  const missing = headers.filter((h) => !have.has(normalizeHeader(h)));
+  if (!missing.length) return;
   await sheets.spreadsheets.values.update({
     spreadsheetId: sheetId(),
-    range: `'${title}'!A1`,
+    range: `'${title}'!${colToA1(current.length)}1`,
     valueInputOption: "RAW",
-    requestBody: { values: [headers as string[]] },
+    requestBody: { values: [missing] },
   });
 }
 
@@ -723,9 +790,11 @@ export async function appendPaymentDue(entry: {
   method: string;
   amount: number;
   poLink: string;
+  invoiceLink: string;
 }): Promise<void> {
   await ensureTab(PAYMENT_DUE_TAB, PAYMENT_DUE_HEADERS);
   const sheets = getSheets();
+  // Order MUST match PAYMENT_DUE_HEADERS; "Invoice Link" is the last column.
   const rowValues = [
     new Date().toISOString(),
     entry.submissionId,
@@ -737,6 +806,7 @@ export async function appendPaymentDue(entry: {
     round2(entry.amount),
     entry.poLink,
     "Payment Due",
+    entry.invoiceLink,
   ];
   await sheets.spreadsheets.values.append({
     spreadsheetId: sheetId(),
@@ -779,6 +849,7 @@ export async function getPaymentDue(): Promise<PaymentDueEntry[]> {
       invoiceDate: pickCI(r, ["Invoice Date"]),
       amount: toNum(pickCI(r, ["PO Amount"]).replace(/[$,]/g, "")),
       poLink: pickCI(r, ["PO Doc Link"]),
+      invoiceLink: pickCI(r, ["Invoice Link"]),
       status: pickCI(r, ["Status"]) || "Payment Due",
       payout: seedPayout(vendorRow, method),
     };

@@ -23,11 +23,39 @@ const STORE_PO_WEBHOOK_URL =
   process.env.STORE_PO_WEBHOOK_URL?.trim() ||
   "https://primary-production-37b78.up.railway.app/webhook/store-po";
 
+// Where we read the vendor's invoice link from when logging a payment-due row.
+// The URL has a public default; the auth key is server-side only (env, never a
+// hardcoded fallback) so it can't leak into the client bundle.
+const SUBMISSION_INFO_URL =
+  process.env.SUBMISSION_INFO_URL?.trim() ||
+  "https://primary-production-37b78.up.railway.app/webhook/submission-info";
+const SUBMISSION_INFO_SECRET = process.env.SUBMISSION_INFO_SECRET?.trim() || "";
+
 interface StorePoResponse {
   ok?: boolean;
   fileName?: string;
   webViewLink?: string;
   error?: string;
+}
+
+// Best-effort lookup of the vendor's invoice link for a submission. Never
+// throws and never logs the URL (it carries the secret): any failure or missing
+// key yields "" so the PO/payment-due write proceeds with a blank invoice link.
+async function fetchInvoiceLink(submissionId: string): Promise<string> {
+  if (!SUBMISSION_INFO_SECRET) return "";
+  try {
+    const url = `${SUBMISSION_INFO_URL}?sid=${encodeURIComponent(
+      submissionId
+    )}&k=${encodeURIComponent(SUBMISSION_INFO_SECRET)}`;
+    const res = await fetch(url, { method: "GET" });
+    if (!res.ok) return "";
+    const data = (await res.json().catch(() => null)) as
+      | { invoiceLink?: unknown }
+      | null;
+    return typeof data?.invoiceLink === "string" ? data.invoiceLink.trim() : "";
+  } catch {
+    return "";
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -148,6 +176,9 @@ export async function POST(request: NextRequest) {
   // Generating a PO = the moment a payment becomes due. Log a payment-due entry
   // Landon can work from without opening a sheet. Best-effort: a failure here
   // must NOT fail the PO (it's already filed), and we never log bank details.
+  // Resolve the invoice link too so the list can link to BOTH the PO and the
+  // invoice (blank when unavailable — never fails the PO).
+  const invoiceLink = await fetchInvoiceLink(submissionId);
   try {
     await appendPaymentDue({
       submissionId,
@@ -158,6 +189,7 @@ export async function POST(request: NextRequest) {
       method: (submission.payout?.method || submission.paymentMethod || "").trim(),
       amount: toNum(body.total),
       poLink: data.webViewLink || "",
+      invoiceLink,
     });
   } catch (e) {
     console.error(

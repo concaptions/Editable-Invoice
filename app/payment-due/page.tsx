@@ -140,11 +140,26 @@ function PaymentDueRow({ entry }: { entry: PaymentDueEntry }) {
             PO link unavailable
           </span>
         )}
+        {entry.invoiceLink ? (
+          <a
+            href={entry.invoiceLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md border border-brand-300 bg-white px-3 py-1.5 text-sm font-semibold text-brand-700 transition hover:bg-brand-50"
+          >
+            Open invoice
+            <span aria-hidden="true">↗</span>
+          </a>
+        ) : (
+          <span className="inline-flex items-center rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm font-medium text-slate-400">
+            Invoice link unavailable
+          </span>
+        )}
         <Link
           href={invoiceHref}
           className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
         >
-          Open invoice
+          Open editor
           <span aria-hidden="true">→</span>
         </Link>
       </div>

@@ -174,12 +174,31 @@ export interface PaymentDueEntry {
   invoiceDate: string;
   amount: number; // the PO's Returned Total
   poLink: string; // generated PO PDF (Drive view link)
+  invoiceLink: string; // the vendor's invoice doc (from submission-info); may be ""
   status: string;
   payout: PayoutDetails; // resolved from the vendor master for display
 }
 
 export interface PaymentDueResponse {
   entries: PaymentDueEntry[];
+}
+
+// One customer matched on the standalone /customer-payouts page (owner tool to
+// pre-enter payout for chosen vendors). Keyed by GHL Contact ID — the same key
+// the payout service writes/reads. `payout` is seeded from the Vendor tab so the
+// card opens pre-filled; account numbers are shown behind the passcode only.
+export interface VendorPayoutMatch {
+  contactId: string;
+  name: string; // "First Last" (may be empty)
+  businessName: string;
+  email: string;
+  method: string; // the vendor's stored Payment Method (may be empty)
+  payout: PayoutDetails;
+}
+
+export interface VendorPayoutSearchResponse {
+  results: VendorPayoutMatch[];
+  error?: string;
 }
 
 // One row of the chronological "PO History" log — appended every time a PO PDF

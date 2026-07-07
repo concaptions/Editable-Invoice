@@ -193,6 +193,7 @@ export interface VendorPayoutMatch {
   businessName: string;
   email: string;
   method: string; // the vendor's stored Payment Method (may be empty)
+  vendorStatus: string; // the Vendor tab "Vendor Status" (may be empty)
   payout: PayoutDetails;
 }
 

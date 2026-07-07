@@ -692,11 +692,36 @@ async function resolveVendorPayout(
   return seedPayout(match, method);
 }
 
+// Maps one Vendor-tab row to a payout match for the /customer-payouts tool, or
+// null when the row has no GHL Contact ID — that id is the key the payout
+// service writes/reads by, so a row without one can't be pre-filled or saved.
+// Shared by search + recent so both surface identical fields (incl. the seeded
+// payout, so the card opens pre-filled and "On file" badges are accurate).
+function vendorRowToPayoutMatch(
+  r: Record<string, string>
+): VendorPayoutMatch | null {
+  const contactId = pickCI(r, ["GHL Contact ID"]);
+  if (!contactId) return null;
+  const method = pickCI(r, ["Payment Method"]);
+  return {
+    contactId,
+    name: [pickCI(r, ["First Name"]), pickCI(r, ["Last Name"])]
+      .filter(Boolean)
+      .join(" ")
+      .trim(),
+    businessName: pickCI(r, ["Business Name"]),
+    email: pickCI(r, ["Email"]),
+    method,
+    vendorStatus: pickCI(r, ["Vendor Status"]),
+    payout: seedPayout(r, method),
+  };
+}
+
 // Searches the Vendor tab for the owner's /customer-payouts tool. Matches a free
-// query against email / GHL Contact ID / name / business name (case-insensitive
-// substring) and returns each hit with its payout seeded (so the card opens
-// pre-filled). Only rows WITH a GHL Contact ID are returned — that id is the key
-// the payout service writes/reads by, so a row without one can't be saved.
+// query against name / business name / email (case-insensitive substring) — the
+// tab has no Vendor ID column (it's keyed by the internal GHL Contact ID), so
+// those human-readable fields are what Landon searches by. Rows without a GHL
+// Contact ID are skipped (no key to save payout against).
 export async function searchVendorPayouts(
   query: string
 ): Promise<VendorPayoutMatch[]> {
@@ -705,30 +730,37 @@ export async function searchVendorPayouts(
   const rows = await readVendorRows();
   const matches: VendorPayoutMatch[] = [];
   for (const r of rows) {
-    const contactId = pickCI(r, ["GHL Contact ID"]);
-    if (!contactId) continue; // no key to save payout against → skip
-    const email = pickCI(r, ["Email"]);
-    const name = [pickCI(r, ["First Name"]), pickCI(r, ["Last Name"])]
-      .filter(Boolean)
-      .join(" ")
-      .trim();
-    const businessName = pickCI(r, ["Business Name"]);
-    const method = pickCI(r, ["Payment Method"]);
-    const haystack = [contactId, email, name, businessName]
-      .join(" ")
-      .toLowerCase();
+    const m = vendorRowToPayoutMatch(r);
+    if (!m) continue;
+    const haystack = [m.name, m.businessName, m.email].join(" ").toLowerCase();
     if (!haystack.includes(q)) continue;
-    matches.push({
-      contactId,
-      name,
-      businessName,
-      email,
-      method,
-      payout: seedPayout(r, method),
-    });
+    matches.push(m);
     if (matches.length >= 25) break; // small cap — this is a lookup, not a list
   }
   return matches;
+}
+
+// The N most-recently-touched customers for the /customer-payouts landing list,
+// newest-first by "Last Modified" (falling back to "Created Date" when blank,
+// then to original sheet order). Same shape as search so the page renders both
+// the same way.
+export async function listRecentVendorPayouts(
+  limit = 20
+): Promise<VendorPayoutMatch[]> {
+  const rows = await readVendorRows();
+  const ranked: { match: VendorPayoutMatch; recency: string; order: number }[] =
+    [];
+  rows.forEach((r, order) => {
+    const match = vendorRowToPayoutMatch(r);
+    if (!match) return;
+    const recency = pickCI(r, ["Last Modified"]) || pickCI(r, ["Created Date"]);
+    ranked.push({ match, recency, order });
+  });
+  ranked.sort((a, b) => {
+    const byDate = compareRecency(a.recency, b.recency);
+    return byDate !== 0 ? byDate : b.order - a.order;
+  });
+  return ranked.slice(0, Math.max(0, limit)).map((x) => x.match);
 }
 
 // Ensures a tab exists with the given header row; creates it (with the header)

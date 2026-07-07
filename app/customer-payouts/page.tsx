@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Spinner } from "@/components/Spinner";
 import { PaymentSection } from "@/components/PaymentSection";
 import { useToast } from "@/app/providers";
@@ -13,19 +13,21 @@ import {
   type VendorPayoutSearchResponse,
 } from "@/lib/types";
 
-// Owner tool to pre-enter payout details for chosen customers, ahead of any PO.
-// Search the Vendor tab (by email / Vendor ID / name), open the SAME payout card
-// used in the PO editor pre-filled from that customer's record, and save. Saving
-// reuses the existing /api/po/payout write path, keyed by the customer's GHL
-// Contact ID — so the details round-trip back through seedPayout everywhere.
+// Owner tool to pre-enter payout details for existing customers, ahead of any
+// PO. Lands on the 20 most-recently-updated customers from the Vendor tab
+// (newest-first); an optional search reaches older ones by name / business /
+// email. Opening a customer shows the SAME payout card used in the PO editor,
+// pre-filled from that customer's record. Saving reuses /api/po/payout, keyed by
+// the customer's GHL Contact ID — so the details round-trip back through
+// seedPayout everywhere.
 //
-// Only customers already in the Vendor tab (i.e. with a GHL contact) can be
-// found here; a brand-new customer has no contact id to key on yet.
+// Every customer here already exists in the Vendor tab (has a GHL contact); this
+// tool never creates contacts.
 export default function CustomerPayoutsPage() {
   const toast = useToast();
   const [query, setQuery] = useState("");
-  const [searching, setSearching] = useState(false);
-  const [searched, setSearched] = useState(false);
+  const [mode, setMode] = useState<"recent" | "search">("recent");
+  const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<VendorPayoutMatch[]>([]);
   const [selected, setSelected] = useState<VendorPayoutMatch | null>(null);
   const [payout, setPayout] = useState<PayoutDetails>(emptyPayout());
@@ -37,34 +39,48 @@ export default function CustomerPayoutsPage() {
     return window.confirm("Discard unsaved payout changes?");
   }
 
-  async function runSearch(e?: FormEvent) {
-    e?.preventDefault();
-    const q = query.trim();
-    if (!q || searching) return;
-    if (selected && !confirmDiscardIfDirty()) return;
-    setSearching(true);
-    setSearched(true);
-    setSelected(null);
+  // Single fetch path for both the recent list (empty q) and search (with q).
+  async function fetchList(q: string): Promise<VendorPayoutMatch[]> {
+    setLoading(true);
     try {
       const res = await fetch(
         `/api/customer-payouts/search?q=${encodeURIComponent(q)}`
       );
       const data = (await res.json().catch(() => ({}))) as VendorPayoutSearchResponse;
       if (!res.ok) {
-        toast("error", data.error || "Search failed.");
+        toast("error", data.error || "Couldn't load customers.");
         setResults([]);
-        return;
+        return [];
       }
       const list = Array.isArray(data.results) ? data.results : [];
       setResults(list);
-      // A single clear hit → open it straight away.
-      if (list.length === 1) selectCustomer(list[0]);
+      return list;
     } catch {
-      toast("error", "Network error while searching.");
+      toast("error", "Network error while loading customers.");
       setResults([]);
+      return [];
     } finally {
-      setSearching(false);
+      setLoading(false);
     }
+  }
+
+  // Land on the recent-20 list.
+  useEffect(() => {
+    setMode("recent");
+    void fetchList("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function runSearch(e?: FormEvent) {
+    e?.preventDefault();
+    if (loading) return;
+    if (selected && !confirmDiscardIfDirty()) return;
+    const q = query.trim();
+    setSelected(null);
+    setMode(q ? "search" : "recent");
+    const list = await fetchList(q);
+    // A single clear search hit → open it straight away (recent list doesn't).
+    if (q && list.length === 1) selectCustomer(list[0]);
   }
 
   function selectCustomer(match: VendorPayoutMatch) {
@@ -73,7 +89,7 @@ export default function CustomerPayoutsPage() {
     setDirty(false);
   }
 
-  function backToResults() {
+  function backToList() {
     if (!confirmDiscardIfDirty()) return;
     setSelected(null);
     setDirty(false);
@@ -89,15 +105,16 @@ export default function CustomerPayoutsPage() {
   // service persists by contactId, which is what identifies this customer.
   async function savePayout() {
     if (!selected || saving) return;
+    const contactId = selected.contactId;
     setSaving(true);
     try {
       const res = await fetch("/api/po/payout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          submissionId: `payout-preload:${selected.contactId}`,
-          contactId: selected.contactId,
-          vendorId: selected.contactId,
+          submissionId: `payout-preload:${contactId}`,
+          contactId,
+          vendorId: contactId,
           payout,
         }),
       });
@@ -113,6 +130,12 @@ export default function CustomerPayoutsPage() {
         return;
       }
       setDirty(false);
+      // Reflect the saved values back into the cached rows so reopening this
+      // customer (without a refetch) shows exactly what was just saved.
+      setSelected((cur) => (cur ? { ...cur, payout } : cur));
+      setResults((list) =>
+        list.map((m) => (m.contactId === contactId ? { ...m, payout } : m))
+      );
       toast("success", "Payout saved to the customer's record.");
     } catch {
       toast("error", "Network error saving payout details.");
@@ -125,9 +148,10 @@ export default function CustomerPayoutsPage() {
     <main className="mx-auto max-w-3xl px-4 py-8">
       <h1 className="text-2xl font-semibold text-slate-900">Customer payouts</h1>
       <p className="mt-1 text-sm text-slate-500">
-        Pre-enter how a customer gets paid, ahead of any PO. Find them below, fill
-        in ACH / Wire details, and save — it&apos;s stored on their vendor record
-        and reused everywhere.
+        Pre-enter how a customer gets paid, ahead of any PO. Pick a recent
+        customer below or search by name, business, or email — fill in ACH / Wire
+        details and save. It&apos;s stored on their vendor record and reused
+        everywhere.
       </p>
 
       <form onSubmit={runSearch} className="mt-6 flex flex-wrap gap-2">
@@ -135,18 +159,18 @@ export default function CustomerPayoutsPage() {
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by email, name, or Vendor ID"
+          placeholder="Search by name, business, or email"
           autoComplete="off"
           spellCheck={false}
           className="min-w-0 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-200"
         />
         <button
           type="submit"
-          disabled={searching || !query.trim()}
+          disabled={loading}
           className="inline-flex items-center justify-center gap-2 rounded-md border border-brand-300 bg-white px-4 py-2 text-sm font-semibold text-brand-700 transition hover:bg-brand-50 disabled:opacity-50"
         >
-          {searching && <Spinner className="h-4 w-4 text-brand-500" />}
-          {searching ? "Searching…" : "Search"}
+          {loading && <Spinner className="h-4 w-4 text-brand-500" />}
+          {loading ? "Loading…" : "Search"}
         </button>
       </form>
 
@@ -154,10 +178,10 @@ export default function CustomerPayoutsPage() {
         <div className="mt-6">
           <button
             type="button"
-            onClick={backToResults}
+            onClick={backToList}
             className="text-sm font-medium text-slate-500 transition hover:text-slate-800"
           >
-            ← Back to results
+            ← Back to list
           </button>
 
           <div className="mt-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -168,7 +192,8 @@ export default function CustomerPayoutsPage() {
               {[
                 selected.businessName && selected.name ? selected.name : "",
                 selected.email,
-                `Vendor ID ${selected.contactId}`,
+                selected.method,
+                selected.vendorStatus,
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -181,14 +206,14 @@ export default function CustomerPayoutsPage() {
             onSave={savePayout}
             saving={saving}
             dirty={dirty}
-            subtitle="Pre-fill how this customer gets paid. Saved straight to their vendor record (keyed by Vendor ID) and reused on every PO."
+            subtitle="Pre-fill how this customer gets paid. Saved straight to their vendor record and reused on every PO."
             saveLabel="Save to record"
           />
         </div>
       ) : (
-        <SearchResults
-          searching={searching}
-          searched={searched}
+        <CustomerList
+          loading={loading}
+          mode={mode}
           results={results}
           onSelect={selectCustomer}
         />
@@ -197,82 +222,84 @@ export default function CustomerPayoutsPage() {
   );
 }
 
-function SearchResults({
-  searching,
-  searched,
+function CustomerList({
+  loading,
+  mode,
   results,
   onSelect,
 }: {
-  searching: boolean;
-  searched: boolean;
+  loading: boolean;
+  mode: "recent" | "search";
   results: VendorPayoutMatch[];
   onSelect: (m: VendorPayoutMatch) => void;
 }) {
-  if (searching) {
+  if (loading) {
     return (
       <div className="mt-8 flex items-center gap-2 text-sm text-slate-500">
         <Spinner className="h-4 w-4 text-slate-400" />
-        Searching customers…
-      </div>
-    );
-  }
-  if (!searched) {
-    return (
-      <div className="mt-8 rounded-lg border border-slate-200 bg-white px-4 py-10 text-center text-sm text-slate-400">
-        Search for a customer to begin.
+        Loading customers…
       </div>
     );
   }
   if (results.length === 0) {
     return (
       <div className="mt-8 rounded-lg border border-slate-200 bg-white px-4 py-10 text-center text-sm text-slate-400">
-        No customers matched. They must already exist in the vendor record (have a
-        GHL contact) to pre-enter payout here.
+        {mode === "search"
+          ? "No customers matched your search."
+          : "No customers in the vendor record yet."}
       </div>
     );
   }
   return (
-    <ul className="mt-6 space-y-2">
-      {results.map((m) => (
-        <li key={m.contactId}>
-          <button
-            type="button"
-            onClick={() => onSelect(m)}
-            className="flex w-full flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-brand-300 hover:bg-brand-50/40"
-          >
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-slate-900">
-                {m.businessName || m.name || "Unnamed customer"}
+    <div className="mt-6">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">
+        {mode === "search"
+          ? `Search results (${results.length})`
+          : "Recent customers"}
+      </div>
+      <ul className="space-y-2">
+        {results.map((m) => (
+          <li key={m.contactId}>
+            <button
+              type="button"
+              onClick={() => onSelect(m)}
+              className="flex w-full flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-brand-300 hover:bg-brand-50/40"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-slate-900">
+                  {m.businessName || m.name || "Unnamed customer"}
+                </div>
+                <div className="mt-0.5 truncate text-xs text-slate-500">
+                  {[m.businessName && m.name ? m.name : "", m.email]
+                    .filter(Boolean)
+                    .join(" · ") || "No email on file"}
+                </div>
               </div>
-              <div className="mt-0.5 truncate text-xs text-slate-500">
-                {[
-                  m.businessName && m.name ? m.name : "",
-                  m.email,
-                  `Vendor ID ${m.contactId}`,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {m.method && (
-                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
-                  {m.method}
+              <div className="flex shrink-0 items-center gap-2">
+                {m.vendorStatus && (
+                  <span className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">
+                    {m.vendorStatus}
+                  </span>
+                )}
+                {m.method && (
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+                    {m.method}
+                  </span>
+                )}
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    hasPayoutDetails(m.payout)
+                      ? "bg-emerald-50 text-emerald-700"
+                      : "bg-amber-50 text-amber-700"
+                  }`}
+                >
+                  {hasPayoutDetails(m.payout) ? "On file" : "No details"}
                 </span>
-              )}
-              <span
-                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                  hasPayoutDetails(m.payout)
-                    ? "bg-emerald-50 text-emerald-700"
-                    : "bg-amber-50 text-amber-700"
-                }`}
-              >
-                {hasPayoutDetails(m.payout) ? "On file" : "No details"}
-              </span>
-            </div>
-          </button>
-        </li>
-      ))}
-    </ul>
+              </div>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

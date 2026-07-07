@@ -193,7 +193,7 @@ export default function CustomerPayoutsPage() {
                 selected.businessName && selected.name ? selected.name : "",
                 selected.email,
                 selected.method,
-                selected.vendorStatus,
+                vendorStatusLabel(selected.vendorStatus),
               ]
                 .filter(Boolean)
                 .join(" · ")}
@@ -220,6 +220,19 @@ export default function CustomerPayoutsPage() {
       )}
     </main>
   );
+}
+
+// The Vendor tab's "Vendor Status" is a boolean-ish flag ("TRUE"/blank in the
+// sheet), not a descriptive status — so a raw "TRUE" pill is meaningless noise.
+// Show a readable label for a truthy flag, hide FALSE/blank, and pass through a
+// genuinely descriptive status verbatim. Display-only: never touches search/save.
+function vendorStatusLabel(raw: string): string | null {
+  const v = (raw ?? "").trim();
+  if (!v) return null;
+  const lower = v.toLowerCase();
+  if (lower === "true") return "Active";
+  if (lower === "false") return null;
+  return v;
 }
 
 function CustomerList({
@@ -258,7 +271,9 @@ function CustomerList({
           : "Recent customers"}
       </div>
       <ul className="space-y-2">
-        {results.map((m) => (
+        {results.map((m) => {
+          const statusLabel = vendorStatusLabel(m.vendorStatus);
+          return (
           <li key={m.contactId}>
             <button
               type="button"
@@ -276,9 +291,9 @@ function CustomerList({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {m.vendorStatus && (
+                {statusLabel && (
                   <span className="rounded-full border border-slate-200 px-2 py-0.5 text-xs font-medium text-slate-500">
-                    {m.vendorStatus}
+                    {statusLabel}
                   </span>
                 )}
                 {m.method && (
@@ -298,7 +313,8 @@ function CustomerList({
               </div>
             </button>
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );

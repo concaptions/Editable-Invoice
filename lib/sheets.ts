@@ -504,12 +504,13 @@ export async function saveSubmission(
 
 // --- Payout details + payment-due list ------------------------------------
 // Payout instructions are NOT on the submission row — they live on the "Vendor"
-// tab (keyed by GHL Contact ID). The intake system captures them granularly, but
-// this sheet only persists a lossy projection: a single number in "ACH/Wire
-// Fields" and a joined address in "Bank Address Fields". We seed the structured
-// payout from those (plus any granular columns that may appear later, matched by
-// header) and let the editor fill the rest. Editing/persisting goes through the
-// external payout service (see /api/po/payout) — never written here.
+// tab (keyed by GHL Contact ID). The payout service now writes granular banking
+// columns there (ACH/Wire fields + Bank Street/City/State/ZIP), so we PREFER
+// those. Older vendors only carry a lossy projection — a single number in
+// "ACH/Wire Fields" and a joined address in "Bank Address Fields" — which we
+// FALL BACK to. Either way we seed the structured payout and let the editor
+// fill the rest. Editing/persisting goes through the external payout service
+// (see /api/po/payout) — never written here.
 
 const VENDOR_TAB = "Vendor";
 const PAYMENT_DUE_TAB = "Payment Due";
@@ -551,6 +552,21 @@ function cleanBlob(value: string): string {
   return s;
 }
 
+// Joins the granular Bank Street/City/State/ZIP columns into the single
+// free-text address the editor, PO PDF, and Payment Due page expect, e.g.
+// "123 Main St, Springfield, IL 62704". State + ZIP share one segment (US
+// convention); empty parts are dropped so a street-only value stays "123 Main
+// St" and an all-empty input yields "".
+function joinBankAddress(
+  street: string,
+  city: string,
+  state: string,
+  zip: string
+): string {
+  const stateZip = [state.trim(), zip.trim()].filter(Boolean).join(" ");
+  return [street.trim(), city.trim(), stateZip].filter(Boolean).join(", ");
+}
+
 // Reads the Vendor tab as { header: value } rows. Never throws — a missing tab
 // or read error yields an empty list so payout seeding degrades to blank.
 async function readVendorRows(): Promise<Record<string, string>[]> {
@@ -563,6 +579,12 @@ async function readVendorRows(): Promise<Record<string, string>[]> {
 
 // Builds structured payout from a Vendor row (may be undefined). `method` (from
 // the submission) takes precedence over the vendor's own Payment Method.
+//
+// PREFER the granular banking columns the payout service now writes back to the
+// Vendor tab; FALL BACK to the legacy lossy blobs ("ACH/Wire Fields",
+// "Bank Address Fields") for vendors captured before those columns existed.
+// Every value is read as a STRING (never Number()/parseInt) so leading zeros on
+// routing, account, and ZIP survive.
 function seedPayout(
   vendorRow: Record<string, string> | undefined,
   method: string
@@ -571,33 +593,79 @@ function seedPayout(
   p.method = (method || (vendorRow ? pickCI(vendorRow, ["Payment Method"]) : "")).trim();
   if (!vendorRow) return p;
 
-  // Granular columns — forward-compatible: populated once the payout service
-  // starts writing them back. Matched by header name.
-  p.achAccountHolder = pickCI(vendorRow, ["ACH Account Holder Name", "ACH Account Holder"]);
-  p.achRoutingNumber = pickCI(vendorRow, ["ACH Routing Number"]);
-  p.achAccountNumber = pickCI(vendorRow, ["ACH Account Number"]);
-  p.achAccountType = pickCI(vendorRow, ["ACH Account Type"]);
-  p.wireBankName = pickCI(vendorRow, ["Wire Bank Name", "Bank Name"]);
-  p.wireRoutingSwift = pickCI(vendorRow, [
-    "Wire Routing Number",
-    "Wire Routing/SWIFT",
+  const m = p.method.toLowerCase();
+  const wireOnly = m.includes("wire") && !m.includes("ach") && !m.includes("both");
+
+  // Granular mode is active when ANY of the exact granular columns the payout
+  // service writes is non-empty. Detection uses only those exact header names,
+  // so a legacy blob-only row can never accidentally trip into granular mode.
+  const hasGranular = [
+    "ACH Account Holder",
+    "ACH Routing",
+    "ACH Account Number",
+    "ACH Account Type",
+    "ACH Bank Name",
+    "Wire Account Holder",
+    "Wire Bank Name",
+    "Wire Routing",
     "Wire SWIFT",
-    "SWIFT",
-  ]);
-  p.wireAccountNumber = pickCI(vendorRow, ["Wire Account Number"]);
-  p.wireBeneficiary = pickCI(vendorRow, [
-    "Wire Account Holder Name",
-    "Wire Beneficiary",
-    "Beneficiary",
-  ]);
+    "Wire Account Number",
+    "Bank Street",
+    "Bank City",
+    "Bank State",
+    "Bank ZIP",
+  ].some((h) => pickCI(vendorRow, [h]) !== "");
+
+  if (hasGranular) {
+    // --- Granular columns (source of truth) → flat PayoutDetails ------------
+    // ACH fields map to their own slots (older aliases kept as harmless
+    // fallbacks).
+    p.achAccountHolder = pickCI(vendorRow, ["ACH Account Holder", "ACH Account Holder Name"]);
+    p.achRoutingNumber = pickCI(vendorRow, ["ACH Routing", "ACH Routing Number"]);
+    p.achAccountNumber = pickCI(vendorRow, ["ACH Account Number"]);
+    p.achAccountType = pickCI(vendorRow, ["ACH Account Type"]);
+
+    // Wire fields map to their own slots. The UI/model keep a single
+    // "Routing / SWIFT" slot, so collapse Wire Routing + Wire SWIFT into it
+    // (routing preferred; the save path re-classifies by shape).
+    p.wireBeneficiary = pickCI(vendorRow, [
+      "Wire Account Holder",
+      "Wire Account Holder Name",
+      "Wire Beneficiary",
+      "Beneficiary",
+    ]);
+    p.wireRoutingSwift =
+      pickCI(vendorRow, ["Wire Routing", "Wire Routing Number"]) ||
+      pickCI(vendorRow, ["Wire SWIFT", "SWIFT"]);
+    p.wireAccountNumber = pickCI(vendorRow, ["Wire Account Number"]);
+
+    // One shared bank-name slot: pick the method-appropriate column, falling
+    // back to the other so an ACH-only (or wire-only) payout still carries it.
+    const achBankName = pickCI(vendorRow, ["ACH Bank Name"]);
+    const wireBankName = pickCI(vendorRow, ["Wire Bank Name", "Bank Name"]);
+    p.wireBankName = wireOnly ? wireBankName || achBankName : achBankName || wireBankName;
+
+    // Assemble the single address string from the granular parts; fall back to
+    // the legacy address blob if the parts are empty (never lose an address).
+    p.bankAddress =
+      joinBankAddress(
+        pickCI(vendorRow, ["Bank Street"]),
+        pickCI(vendorRow, ["Bank City"]),
+        pickCI(vendorRow, ["Bank State"]),
+        pickCI(vendorRow, ["Bank ZIP", "Bank Zip"])
+      ) || cleanBlob(pickCI(vendorRow, ["Bank Address Fields", "Bank Address"]));
+
+    return p;
+  }
+
+  // --- Legacy blob fallback (unchanged behavior) ---------------------------
+  // Old rows carry only a joined address in "Bank Address Fields" and a single
+  // number in "ACH/Wire Fields". Seed that number into the routing field of
+  // whichever method applies.
   p.bankAddress = cleanBlob(pickCI(vendorRow, ["Bank Address Fields", "Bank Address"]));
 
-  // Legacy lossy blob: a single number in "ACH/Wire Fields". Seed it into the
-  // routing field of whichever method applies, without clobbering a granular one.
   const blob = cleanBlob(pickCI(vendorRow, ["ACH/Wire Fields"]));
   if (blob) {
-    const m = p.method.toLowerCase();
-    const wireOnly = m.includes("wire") && !m.includes("ach") && !m.includes("both");
     if (wireOnly) {
       if (!p.wireRoutingSwift) p.wireRoutingSwift = blob;
     } else if (!p.achRoutingNumber) {
